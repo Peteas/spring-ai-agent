@@ -12,6 +12,7 @@ import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -51,18 +52,29 @@ public class AgentController {
         }
 
         final String finalSessionId = sessionId;
+
+        // 创建心跳流，每 30 秒发送一次心跳
+        Flux<ServerSentEvent<Map<String, Object>>> heartbeat = Flux.interval(Duration.ofSeconds(30))
+                .map(i -> ServerSentEvent.<Map<String, Object>>builder()
+                        .comment("heartbeat")
+                        .build());
+
+        // 创建消息流
+        Flux<ServerSentEvent<Map<String, Object>>> messageStream = agent.chatStream(finalSessionId, request.message())
+                .map(event -> ServerSentEvent.<Map<String, Object>>builder()
+                        .event(event.type().name().toLowerCase())
+                        .data(Map.of(
+                                "type", event.type().name(),
+                                "toolName", event.toolName() != null ? event.toolName() : "",
+                                "content", event.content() != null ? event.content() : "",
+                                "isError", event.isError()
+                        ))
+                        .build());
+
+        // 合并心跳和消息流
         return ResponseEntity.ok()
                 .contentType(MediaType.TEXT_EVENT_STREAM)
-                .body(agent.chatStream(finalSessionId, request.message())
-                        .map(event -> ServerSentEvent.<Map<String, Object>>builder()
-                                .event(event.type().name().toLowerCase())
-                                .data(Map.of(
-                                        "type", event.type().name(),
-                                        "toolName", event.toolName() != null ? event.toolName() : "",
-                                        "content", event.content() != null ? event.content() : "",
-                                        "isError", event.isError()
-                                ))
-                                .build()));
+                .body(Flux.merge(heartbeat, messageStream));
     }
 
     @GetMapping("/sessions")
