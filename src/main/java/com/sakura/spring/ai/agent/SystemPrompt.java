@@ -3,16 +3,31 @@ package com.sakura.spring.ai.agent;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class SystemPrompt {
 
+    // 缓存 system prompt，避免每次请求都重新构建
+    private static final AtomicReference<String> cachedPrompt = new AtomicReference<>();
+    private static volatile String lastGitBranch = null;
+    private static volatile long lastBuildTime = 0;
+    private static final long CACHE_TTL = 60000; // 1 minute
+
     public static String build(Path workingDir) {
+        // 检查缓存是否有效
+        long now = System.currentTimeMillis();
+        if (cachedPrompt.get() != null && (now - lastBuildTime) < CACHE_TTL) {
+            return cachedPrompt.get();
+        }
+
+        // 重新构建 prompt
         String os = System.getProperty("os.name") + " " + System.getProperty("os.arch");
         String javaVersion = System.getProperty("java.version");
-        String now = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+        String currentTime = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
         String gitBranch = getGitBranch(workingDir);
 
-        return """
+        String prompt = """
                 You are MiMo Code Agent, an AI-powered coding assistant built on Xiaomi's MiMo large language model. You help users with software engineering tasks by reading, writing, and editing code, executing commands, searching codebases, and managing projects.
 
                 # Environment
@@ -65,9 +80,24 @@ public class SystemPrompt {
                 workingDir.toAbsolutePath(),
                 os,
                 javaVersion,
-                now,
+                currentTime,
                 gitBranch
         );
+
+        // 更新缓存
+        cachedPrompt.set(prompt);
+        lastGitBranch = gitBranch;
+        lastBuildTime = now;
+
+        return prompt;
+    }
+
+    /**
+     * 清除缓存，强制下次调用重新构建
+     */
+    public static void clearCache() {
+        cachedPrompt.set(null);
+        lastBuildTime = 0;
     }
 
     private static String getGitBranch(Path workingDir) {
