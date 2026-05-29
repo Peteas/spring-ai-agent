@@ -1,12 +1,21 @@
 package com.sakura.spring.ai.agent.tool;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.io.*;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 
 @Component
 public class GitTool implements Tool {
+
+    @Value("${mimo.agent.command-timeout:120}")
+    private int commandTimeout;
+
+    private static final Path WORKING_DIR = Paths.get(System.getProperty("user.dir")).toAbsolutePath().normalize();
 
     @Override
     public String name() {
@@ -62,6 +71,16 @@ public class GitTool implements Tool {
                 if (files == null || files.isEmpty()) {
                     yield runGit("add", ".");
                 }
+                // 校验文件路径，防止参数注入
+                for (String file : files) {
+                    if (file.startsWith("-")) {
+                        yield ToolResult.error("Invalid file path: " + file + ". File paths cannot start with '-'");
+                    }
+                    Path filePath = WORKING_DIR.resolve(file).normalize();
+                    if (!filePath.startsWith(WORKING_DIR)) {
+                        yield ToolResult.error("Access denied: path outside working directory");
+                    }
+                }
                 String[] fileArgs = new String[files.size() + 1];
                 fileArgs[0] = "add";
                 for (int i = 0; i < files.size(); i++) {
@@ -96,13 +115,22 @@ public class GitTool implements Tool {
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
+                    if (output.length() > 30000) {
+                        output.append("\n... (output truncated)");
+                        process.destroyForcibly();
+                        return ToolResult.success(output.toString());
+                    }
                     output.append(line).append("\n");
                 }
             }
 
-            process.waitFor();
-            int exitCode = process.exitValue();
+            boolean finished = process.waitFor(commandTimeout, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                return ToolResult.error("Git command timed out after " + commandTimeout + " seconds.\nPartial output:\n" + output);
+            }
 
+            int exitCode = process.exitValue();
             String result = output.toString().isEmpty() ? "(no output)" : output.toString();
             if (exitCode != 0) {
                 return ToolResult.error("Git command failed (exit " + exitCode + "):\n" + result);
