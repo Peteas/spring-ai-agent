@@ -1,0 +1,39 @@
+#端口
+server:
+  port: 8080
+spring:
+  application:
+    name: spring-ai-agent
+  profiles:
+    active: mimo
+  # MiMo API 配置
+  ai:
+    openai:
+      base-url: ${MIMO_BASE_URL:https://token-plan-cn.xiaomimimo.com/v1}
+      api-key: ${AI_XIAOMI_API_KEY}
+      chat:
+        completions-path: /chat/completions
+        options:
+          model: mimo-v2.5-pro
+  # Redis 配置（会话历史存储）
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: 0
+      timeout: 3000
+      lettuce:
+        pool:
+          max-active: 8
+          max-idle: 8
+          min-idle: 0
+          max-wait: -1
+
+# MiMo Agent 配置
+mimo:
+  agent:
+    working-dir: ${user.dir}
+    command-timeout: 120
+    max-context-messages: 50
+    safety-mode: strict
