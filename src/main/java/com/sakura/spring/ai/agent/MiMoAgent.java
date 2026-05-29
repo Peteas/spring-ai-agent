@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sakura.spring.ai.agent.memory.ConversationMemory;
 import com.sakura.spring.ai.agent.tool.Tool;
 import com.sakura.spring.ai.agent.tool.ToolRegistry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.*;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -21,6 +23,9 @@ import java.util.*;
 
 @Service
 public class MiMoAgent {
+
+    private static final Logger log = LoggerFactory.getLogger(MiMoAgent.class);
+    private static final int MAX_TOOL_CALL_ROUNDS = 20;
 
     private final ChatModel chatModel;
     private final ToolRegistry toolRegistry;
@@ -39,6 +44,7 @@ public class MiMoAgent {
      * Streaming chat — returns a Flux of AgentEvents with true token-level streaming.
      */
     public Flux<AgentEvent> chatStream(String sessionId, String userMessage) {
+        log.info("Chat session {} - User message length: {}", sessionId, userMessage.length());
         memory.addUserMessage(sessionId, userMessage);
         String systemPrompt = SystemPrompt.build(Path.of(System.getProperty("user.dir")));
 
@@ -47,9 +53,17 @@ public class MiMoAgent {
         messages.addAll(memory.getMessages(sessionId));
         List<ToolCallback> toolCallbacks = toolRegistry.getToolCallbacks();
 
+        final int[] toolCallRound = {0};
+
         return Flux.defer(() -> {
             List<AssistantMessage.ToolCall> accumulatedToolCalls = new ArrayList<>();
             StringBuilder contentBuilder = new StringBuilder();
+
+            // 检查工具调用轮次限制
+            if (toolCallRound[0] >= MAX_TOOL_CALL_ROUNDS) {
+                log.warn("Session {} reached maximum tool call rounds ({})", sessionId, MAX_TOOL_CALL_ROUNDS);
+                return Flux.just(AgentEvent.error("Maximum tool call rounds reached (" + MAX_TOOL_CALL_ROUNDS + "). Stopping to prevent infinite loop."));
+            }
 
             ToolCallingChatOptions options = ToolCallingChatOptions.builder()
                     .internalToolExecutionEnabled(false)
@@ -84,6 +98,9 @@ public class MiMoAgent {
                     })
                     .concatWith(Flux.defer(() -> {
                         if (!accumulatedToolCalls.isEmpty()) {
+                            toolCallRound[0]++;
+                            log.debug("Session {} - Tool call round {}/{}", sessionId, toolCallRound[0], MAX_TOOL_CALL_ROUNDS);
+
                             messages.add(AssistantMessage.builder()
                                     .content(contentBuilder.toString())
                                     .toolCalls(accumulatedToolCalls)
@@ -91,6 +108,7 @@ public class MiMoAgent {
 
                             List<AgentEvent> toolEvents = new ArrayList<>();
                             for (var tc : accumulatedToolCalls) {
+                                log.debug("Session {} - Executing tool: {}", sessionId, tc.name());
                                 toolEvents.add(AgentEvent.toolCall(tc.name(), tc.arguments()));
                                 Tool.ToolResult result = toolRegistry.execute(tc.name(),
                                         parseArguments(tc.arguments()));
@@ -106,6 +124,7 @@ public class MiMoAgent {
                             String answer = contentBuilder.toString();
                             if (!answer.isEmpty()) {
                                 memory.addAssistantMessage(sessionId, answer);
+                                log.info("Session {} - Response length: {}", sessionId, answer.length());
                             }
                             return Flux.just(AgentEvent.done());
                         }
@@ -114,7 +133,10 @@ public class MiMoAgent {
         .repeat()
         .takeUntil(event -> event.type() == AgentEvent.EventType.DONE
                 || event.type() == AgentEvent.EventType.ERROR)
-        .onErrorResume(e -> Flux.just(AgentEvent.error("Agent error: " + e.getMessage())));
+        .onErrorResume(e -> {
+            log.error("Session {} - Agent error: {}", sessionId, e.getMessage(), e);
+            return Flux.just(AgentEvent.error("Agent error: " + e.getMessage()));
+        });
     }
 
     /**
@@ -159,6 +181,7 @@ public class MiMoAgent {
             if (json == null || json.isBlank()) return Map.of();
             return objectMapper.readValue(json, new TypeReference<>() {});
         } catch (Exception e) {
+            log.warn("Failed to parse tool arguments: {}", e.getMessage());
             return Map.of();
         }
     }

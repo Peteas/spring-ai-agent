@@ -3,7 +3,10 @@ package com.sakura.spring.ai.agent.memory;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.*;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
@@ -11,43 +14,67 @@ import org.springframework.beans.factory.annotation.Autowired;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 @Component
 public class ConversationMemory {
 
+    private static final Logger log = LoggerFactory.getLogger(ConversationMemory.class);
     private static final String KEY_PREFIX = "mimo:session:";
     private static final String SESSIONS_KEY = "mimo:sessions";
+    private static final long REDIS_RETRY_INTERVAL = 60000; // 1 minute
 
     private StringRedisTemplate redis;
     private final ObjectMapper objectMapper;
-    private final int maxMessages;
+
+    @Value("${mimo.agent.max-context-messages:50}")
+    private int maxMessages;
 
     // Fallback in-memory store when Redis is unavailable
     private final Map<String, List<Message>> inMemoryFallback = new ConcurrentHashMap<>();
-    private volatile boolean redisAvailable = false;
+    private final AtomicBoolean redisAvailable = new AtomicBoolean(false);
+    private volatile long lastRedisCheckTime = 0;
 
     public ConversationMemory() {
         this.objectMapper = new ObjectMapper();
-        this.maxMessages = 50;
     }
 
     @Autowired(required = false)
     public void setRedis(StringRedisTemplate redis) {
         this.redis = redis;
-        if (redis != null) {
-            try {
-                redis.hasKey("test");
-                this.redisAvailable = true;
-            } catch (Exception e) {
-                this.redisAvailable = false;
-            }
+        checkRedisConnection();
+    }
+
+    private void checkRedisConnection() {
+        if (redis == null) {
+            redisAvailable.set(false);
+            return;
+        }
+        try {
+            redis.hasKey(KEY_PREFIX + "connection_test");
+            redisAvailable.set(true);
+            lastRedisCheckTime = System.currentTimeMillis();
+            log.info("Redis connection established");
+        } catch (Exception e) {
+            redisAvailable.set(false);
+            log.warn("Redis connection failed, using in-memory fallback: {}", e.getMessage());
         }
     }
 
+    private boolean isRedisAvailable() {
+        if (redis == null) return false;
+        // 尝试重连
+        if (!redisAvailable.get() && System.currentTimeMillis() - lastRedisCheckTime > REDIS_RETRY_INTERVAL) {
+            checkRedisConnection();
+        }
+        return redisAvailable.get();
+    }
+
     public List<Message> getMessages(String sessionId) {
-        if (!redisAvailable) {
-            return inMemoryFallback.getOrDefault(sessionId, new ArrayList<>());
+        if (!isRedisAvailable()) {
+            return new ArrayList<>(inMemoryFallback.getOrDefault(sessionId, new CopyOnWriteArrayList<>()));
         }
         try {
             List<String> jsonList = redis.opsForList().range(KEY_PREFIX + sessionId, 0, -1);
@@ -57,14 +84,16 @@ public class ConversationMemory {
                     .filter(Objects::nonNull)
                     .collect(Collectors.toCollection(ArrayList::new));
         } catch (Exception e) {
-            redisAvailable = false;
-            return inMemoryFallback.getOrDefault(sessionId, new ArrayList<>());
+            log.error("Failed to get messages from Redis for session {}: {}", sessionId, e.getMessage());
+            redisAvailable.set(false);
+            return new ArrayList<>(inMemoryFallback.getOrDefault(sessionId, new CopyOnWriteArrayList<>()));
         }
     }
 
     public void addMessage(String sessionId, Message message) {
-        if (!redisAvailable) {
-            inMemoryFallback.computeIfAbsent(sessionId, k -> new ArrayList<>()).add(message);
+        if (!isRedisAvailable()) {
+            inMemoryFallback.computeIfAbsent(sessionId, k -> new CopyOnWriteArrayList<>()).add(message);
+            log.debug("Added message to in-memory store for session {}", sessionId);
             return;
         }
         try {
@@ -78,8 +107,9 @@ public class ConversationMemory {
                 redis.opsForList().trim(KEY_PREFIX + sessionId, size - maxMessages, -1);
             }
         } catch (Exception e) {
-            redisAvailable = false;
-            inMemoryFallback.computeIfAbsent(sessionId, k -> new ArrayList<>()).add(message);
+            log.error("Failed to add message to Redis for session {}: {}", sessionId, e.getMessage());
+            redisAvailable.set(false);
+            inMemoryFallback.computeIfAbsent(sessionId, k -> new CopyOnWriteArrayList<>()).add(message);
         }
     }
 
@@ -99,37 +129,41 @@ public class ConversationMemory {
     }
 
     public void clearSession(String sessionId) {
-        if (!redisAvailable) {
+        if (!isRedisAvailable()) {
             inMemoryFallback.remove(sessionId);
             return;
         }
         try {
             redis.delete(KEY_PREFIX + sessionId);
             redis.opsForSet().remove(SESSIONS_KEY, sessionId);
+            log.debug("Cleared session {} from Redis", sessionId);
         } catch (Exception e) {
+            log.error("Failed to clear session {} from Redis: {}", sessionId, e.getMessage());
             inMemoryFallback.remove(sessionId);
         }
     }
 
     public List<String> listSessions() {
-        if (!redisAvailable) {
+        if (!isRedisAvailable()) {
             return new ArrayList<>(inMemoryFallback.keySet());
         }
         try {
             Set<String> members = redis.opsForSet().members(SESSIONS_KEY);
             return members != null ? new ArrayList<>(members) : List.of();
         } catch (Exception e) {
-            redisAvailable = false;
+            log.error("Failed to list sessions from Redis: {}", e.getMessage());
+            redisAvailable.set(false);
             return new ArrayList<>(inMemoryFallback.keySet());
         }
     }
 
     public boolean hasSession(String sessionId) {
-        if (!redisAvailable) return inMemoryFallback.containsKey(sessionId);
+        if (!isRedisAvailable()) return inMemoryFallback.containsKey(sessionId);
         try {
             Boolean has = redis.hasKey(KEY_PREFIX + sessionId);
             return Boolean.TRUE.equals(has);
         } catch (Exception e) {
+            log.error("Failed to check session {} in Redis: {}", sessionId, e.getMessage());
             return inMemoryFallback.containsKey(sessionId);
         }
     }
