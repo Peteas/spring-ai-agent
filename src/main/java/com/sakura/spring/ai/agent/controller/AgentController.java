@@ -15,6 +15,7 @@ import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.util.*;
@@ -56,18 +57,17 @@ public class AgentController {
             return ResponseEntity.badRequest().body(Map.of("error", "Invalid sessionId format. Use alphanumeric characters and hyphens, max 64 chars"));
         }
 
+        // regenerate: 删除最后一轮对话
+        if (Boolean.TRUE.equals(request.regenerate())) {
+            memory.removeLastMessages(sessionId, 2);
+        }
+
         // 关联 session 到用户
         if (userDetails != null) {
             userService.associateSession(userDetails.getUserId(), sessionId);
         }
 
         final String finalSessionId = sessionId;
-
-        // 创建心跳流，每 30 秒发送一次心跳
-        Flux<ServerSentEvent<Map<String, Object>>> heartbeat = Flux.interval(Duration.ofSeconds(30))
-                .map(i -> ServerSentEvent.<Map<String, Object>>builder()
-                        .comment("heartbeat")
-                        .build());
 
         // 创建消息流
         Flux<ServerSentEvent<Map<String, Object>>> messageStream = agent.chatStream(finalSessionId, request.message())
@@ -79,6 +79,15 @@ public class AgentController {
                                 "content", event.content() != null ? event.content() : "",
                                 "isError", event.isError()
                         ))
+                        .build())
+                .cache(); // 缓存以便 heartbeat 能检测到完成
+
+        // 心跳流：在消息流完成/错误时自动终止
+        Mono<Void> streamTerminated = messageStream.then(Mono.<Void>empty()).onErrorResume(e -> Mono.empty());
+        Flux<ServerSentEvent<Map<String, Object>>> heartbeat = Flux.interval(Duration.ofSeconds(30))
+                .takeUntilOther(streamTerminated)
+                .map(i -> ServerSentEvent.<Map<String, Object>>builder()
+                        .comment("heartbeat")
                         .build());
 
         // 合并心跳和消息流
@@ -147,5 +156,5 @@ public class AgentController {
                 .toList());
     }
 
-    public record ChatRequest(String message, String sessionId) {}
+    public record ChatRequest(String message, String sessionId, Boolean regenerate) {}
 }
