@@ -128,6 +128,32 @@ public class ConversationMemory {
                 .build());
     }
 
+    public void removeLastMessages(String sessionId, int count) {
+        if (!isRedisAvailable()) {
+            List<Message> messages = inMemoryFallback.get(sessionId);
+            if (messages != null && messages.size() >= count) {
+                for (int i = 0; i < count; i++) {
+                    messages.remove(messages.size() - 1);
+                }
+            }
+            return;
+        }
+        try {
+            Long size = redis.opsForList().size(KEY_PREFIX + sessionId);
+            if (size != null && size >= count) {
+                redis.opsForList().trim(KEY_PREFIX + sessionId, 0, size - count - 1);
+            }
+        } catch (Exception e) {
+            log.error("Failed to remove last {} messages from session {}: {}", count, sessionId, e.getMessage());
+            List<Message> messages = inMemoryFallback.get(sessionId);
+            if (messages != null && messages.size() >= count) {
+                for (int i = 0; i < count; i++) {
+                    messages.remove(messages.size() - 1);
+                }
+            }
+        }
+    }
+
     public void clearSession(String sessionId) {
         if (!isRedisAvailable()) {
             inMemoryFallback.remove(sessionId);
@@ -179,6 +205,7 @@ public class ConversationMemory {
             if (message instanceof AssistantMessage am && am.getToolCalls() != null && !am.getToolCalls().isEmpty()) {
                 data.put("toolCalls", am.getToolCalls().stream().map(tc -> Map.of(
                         "id", tc.id(),
+                        "type", tc.type(),
                         "name", tc.name(),
                         "arguments", tc.arguments()
                 )).toList());
@@ -207,8 +234,21 @@ public class ConversationMemory {
             return switch (type) {
                 case "USER" -> new UserMessage(text);
                 case "ASSISTANT" -> {
-                    AssistantMessage msg = new AssistantMessage(text);
-                    yield msg;
+                    List<Map<String, Object>> toolCalls = (List<Map<String, Object>>) data.get("toolCalls");
+                    if (toolCalls != null && !toolCalls.isEmpty()) {
+                        List<AssistantMessage.ToolCall> tcList = toolCalls.stream()
+                                .map(tc -> new AssistantMessage.ToolCall(
+                                        (String) tc.get("id"),
+                                        (String) tc.getOrDefault("type", "function"),
+                                        (String) tc.get("name"),
+                                        (String) tc.get("arguments")
+                                )).toList();
+                        yield AssistantMessage.builder()
+                                .content(text)
+                                .toolCalls(tcList)
+                                .build();
+                    }
+                    yield new AssistantMessage(text);
                 }
                 case "SYSTEM" -> new SystemMessage(text);
                 case "TOOL" -> {
