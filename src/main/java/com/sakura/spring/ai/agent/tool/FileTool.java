@@ -11,6 +11,8 @@ import java.util.stream.Stream;
 @Component
 public class FileTool implements Tool {
 
+    private static final Path WORKING_DIR = Paths.get(System.getProperty("user.dir")).toAbsolutePath().normalize();
+
     @Override
     public String name() {
         return "file_operations";
@@ -67,11 +69,17 @@ public class FileTool implements Tool {
 
         Path filePath = Paths.get(path).normalize();
 
+        // 安全校验：确保路径在工作目录内，防止路径穿越
+        Path resolvedPath = WORKING_DIR.resolve(filePath).normalize();
+        if (!resolvedPath.startsWith(WORKING_DIR)) {
+            return ToolResult.error("Access denied: path outside working directory");
+        }
+
         return switch (action) {
-            case "read_file" -> readFile(filePath, args);
-            case "write_file" -> writeFile(filePath, args);
-            case "edit_file" -> editFile(filePath, args);
-            case "list_directory" -> listDirectory(filePath);
+            case "read_file" -> readFile(resolvedPath, args);
+            case "write_file" -> writeFile(resolvedPath, args);
+            case "edit_file" -> editFile(resolvedPath, args);
+            case "list_directory" -> listDirectory(resolvedPath);
             default -> ToolResult.error("Unknown action: " + action);
         };
     }
