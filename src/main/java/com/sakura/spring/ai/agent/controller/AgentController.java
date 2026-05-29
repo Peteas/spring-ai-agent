@@ -5,6 +5,7 @@ import com.sakura.spring.ai.agent.MiMoAgent.AgentEvent;
 import com.sakura.spring.ai.agent.memory.ConversationMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -13,9 +14,7 @@ import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 
 import java.time.Duration;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 import java.util.regex.Pattern;
 
 @RestController
@@ -89,13 +88,38 @@ public class AgentController {
     }
 
     @GetMapping("/sessions/{sessionId}/messages")
-    public List<Map<String, String>> getMessages(@PathVariable String sessionId) {
+    public List<Map<String, Object>> getMessages(@PathVariable String sessionId) {
         return memory.getMessages(sessionId).stream()
-                .filter(m -> m instanceof UserMessage || m instanceof AssistantMessage)
-                .map(m -> Map.of(
-                        "role", m instanceof UserMessage ? "user" : "assistant",
-                        "content", m.getText() != null ? m.getText() : ""
-                ))
+                .map(m -> {
+                    Map<String, Object> msg = new LinkedHashMap<>();
+                    if (m instanceof UserMessage) {
+                        msg.put("role", "user");
+                        msg.put("content", m.getText() != null ? m.getText() : "");
+                    } else if (m instanceof AssistantMessage am) {
+                        msg.put("role", "assistant");
+                        msg.put("content", m.getText() != null ? m.getText() : "");
+                        if (am.getToolCalls() != null && !am.getToolCalls().isEmpty()) {
+                            msg.put("toolCalls", am.getToolCalls().stream()
+                                    .map(tc -> Map.of(
+                                            "id", tc.id(),
+                                            "name", tc.name(),
+                                            "arguments", tc.arguments()
+                                    )).toList());
+                        }
+                    } else if (m instanceof ToolResponseMessage trm) {
+                        msg.put("role", "tool");
+                        msg.put("content", trm.getResponses().stream()
+                                .map(r -> Map.of(
+                                        "id", r.id(),
+                                        "name", r.name(),
+                                        "result", r.responseData()
+                                )).toList());
+                    } else {
+                        msg.put("role", "system");
+                        msg.put("content", m.getText() != null ? m.getText() : "");
+                    }
+                    return msg;
+                })
                 .toList();
     }
 

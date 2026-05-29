@@ -566,13 +566,62 @@
         .msg-content strong { color: var(--accent-light); font-weight: 600; }
         .msg-content ul, .msg-content ol { padding-left: 20px; margin: 8px 0; }
         .msg-content li { margin-bottom: 4px; }
-        .msg-content h1, .msg-content h2, .msg-content h3 {
+        .msg-content h1, .msg-content h2, .msg-content h3,
+        .msg-content h4, .msg-content h5, .msg-content h6 {
             margin: 16px 0 8px;
             font-weight: 600;
         }
         .msg-content h1 { font-size: 18px; }
         .msg-content h2 { font-size: 16px; }
         .msg-content h3 { font-size: 14px; }
+        .msg-content h4 { font-size: 13px; }
+        .msg-content h5 { font-size: 12px; }
+        .msg-content h6 { font-size: 12px; color: var(--text-secondary); }
+
+        .msg-content a {
+            color: var(--accent-light);
+            text-decoration: none;
+        }
+        .msg-content a:hover {
+            text-decoration: underline;
+        }
+
+        .msg-content blockquote {
+            border-left: 3px solid var(--accent);
+            padding-left: 12px;
+            margin: 8px 0;
+            color: var(--text-secondary);
+            font-style: italic;
+        }
+
+        .msg-content hr {
+            border: none;
+            border-top: 1px solid var(--border);
+            margin: 16px 0;
+        }
+
+        .msg-content del {
+            color: var(--text-secondary);
+        }
+
+        .msg-content table {
+            border-collapse: collapse;
+            margin: 8px 0;
+            width: 100%;
+            font-size: 13px;
+        }
+        .msg-content th, .msg-content td {
+            border: 1px solid var(--border);
+            padding: 6px 10px;
+            text-align: left;
+        }
+        .msg-content th {
+            background: var(--bg-hover);
+            font-weight: 600;
+        }
+        .msg-content tr:hover {
+            background: var(--bg-hover);
+        }
 
         /* Tool calls */
         .tool-call {
@@ -1232,7 +1281,24 @@
                     if (messages.length === 0) {
                         showWelcome();
                     } else {
-                        messages.forEach(m => addMessage(m.role, m.content));
+                        messages.forEach(m => {
+                            if (m.role === 'tool') {
+                                // 渲染工具调用结果
+                                if (Array.isArray(m.content)) {
+                                    m.content.forEach(tool => {
+                                        addToolResult(tool.name, tool.result, false);
+                                    });
+                                }
+                            } else if (m.role === 'assistant' && m.toolCalls) {
+                                // 渲染带工具调用的助手消息
+                                addMessage(m.role, m.content);
+                                m.toolCalls.forEach(tc => {
+                                    addToolCall(tc.name, tc.arguments);
+                                });
+                            } else {
+                                addMessage(m.role, m.content);
+                            }
+                        });
                     }
                 } else {
                     messagesContainer.innerHTML = '';
@@ -1564,26 +1630,91 @@
         function renderMarkdown(text) {
             let html = escapeHtml(text);
 
-            // Code blocks with language
+            // Code blocks with language (must be first to prevent inner processing)
+            const codeBlocks = [];
             html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (match, lang, code) => {
-                return `<pre data-lang="${lang}"><code>${code}</code></pre>`;
+                const placeholder = `__CODE_BLOCK_${codeBlocks.length}__`;
+                codeBlocks.push(`<pre data-lang="${lang}"><code>${code}</code></pre>`);
+                return placeholder;
             });
 
-            html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-            html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-            html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
+            // Inline code
+            const inlineCodes = [];
+            html = html.replace(/`([^`]+)`/g, (match, code) => {
+                const placeholder = `__INLINE_CODE_${inlineCodes.length}__`;
+                inlineCodes.push(`<code>${code}</code>`);
+                return placeholder;
+            });
+
+            // Tables
+            html = html.replace(/^\|(.+)\|\s*\n\|[-\s|:]+\|\s*\n((?:\|.+\|\s*\n?)*)/gm, (match, header, body) => {
+                const headers = header.split('|').map(h => h.trim()).filter(h => h);
+                const rows = body.trim().split('\n').map(row =>
+                    row.split('|').map(cell => cell.trim()).filter(cell => cell)
+                );
+
+                let table = '<table><thead><tr>';
+                headers.forEach(h => table += `<th>${h}</th>`);
+                table += '</tr></thead><tbody>';
+                rows.forEach(row => {
+                    table += '<tr>';
+                    row.forEach(cell => table += `<td>${cell}</td>`);
+                    table += '</tr>';
+                });
+                table += '</tbody></table>';
+                return table;
+            });
+
+            // Headers
+            html = html.replace(/^###### (.*$)/gm, '<h6>$1</h6>');
+            html = html.replace(/^##### (.*$)/gm, '<h5>$1</h5>');
+            html = html.replace(/^#### (.*$)/gm, '<h4>$1</h4>');
             html = html.replace(/^### (.*$)/gm, '<h3>$1</h3>');
             html = html.replace(/^## (.*$)/gm, '<h2>$1</h2>');
             html = html.replace(/^# (.*$)/gm, '<h1>$1</h1>');
 
-            // Lists: collect consecutive li items into ul
-            html = html.replace(/^(\s*)\- (.*$)/gm, '$1<li>$2</li>');
+            // Horizontal rule
+            html = html.replace(/^---+$/gm, '<hr>');
+
+            // Blockquote
+            html = html.replace(/^> (.*$)/gm, '<blockquote>$1</blockquote>');
+
+            // Bold and italic
+            html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+            html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
+            html = html.replace(/~~(.*?)~~/g, '<del>$1</del>');
+
+            // Links
+            html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+            html = html.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+
+            // Unordered lists
+            html = html.replace(/^(\s*)[-*] (.*$)/gm, '$1<li>$2</li>');
             html = html.replace(/((?:<li>.*<\/li>\s*)+)/g, '<ul>$1</ul>');
 
+            // Ordered lists
+            html = html.replace(/^\d+\. (.*$)/gm, '<oli>$1</oli>');
+            html = html.replace(/((?:<oli>.*<\/oli>\s*)+)/g, (match) => {
+                return '<ol>' + match.replace(/<oli>/g, '<li>').replace(/<\/oli>/g, '</li>') + '</ol>';
+            });
+
+            // Line breaks (but not inside lists)
             html = html.replace(/\n/g, '<br>');
             html = html.replace(/<\/ul><br><ul>/g, '');
             html = html.replace(/<br><\/ul>/g, '</ul>');
             html = html.replace(/<ul><br>/g, '<ul>');
+            html = html.replace(/<\/ol><br><ol>/g, '');
+            html = html.replace(/<br><\/ol>/g, '</ol>');
+            html = html.replace(/<ol><br>/g, '<ol>');
+
+            // Restore code blocks
+            codeBlocks.forEach((block, i) => {
+                html = html.replace(`__CODE_BLOCK_${i}__`, block);
+            });
+            inlineCodes.forEach((code, i) => {
+                html = html.replace(`__INLINE_CODE_${i}__`, code);
+            });
+
             return html;
         }
 
