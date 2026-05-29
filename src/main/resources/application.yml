@@ -29,6 +29,25 @@ spring:
           max-idle: 8
           min-idle: 0
           max-wait: -1
+  # PostgreSQL 配置（用户数据存储）
+  datasource:
+    url: jdbc:postgresql://localhost:5432/postgres
+    username: admin
+    password: admin
+    driver-class-name: org.postgresql.Driver
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+
+# MyBatis-Plus 配置
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
 
 # MiMo Agent 配置
 mimo:
@@ -37,3 +56,8 @@ mimo:
     command-timeout: 120
     max-context-messages: 50
     safety-mode: strict
+  # JWT 配置
+  jwt:
+    secret: ${JWT_SECRET:mimo-agent-jwt-secret-key-that-is-long-enough-for-hs256}
+    expiration: 86400000  # 24 hours
+    refresh-expiration: 604800000  # 7 days
