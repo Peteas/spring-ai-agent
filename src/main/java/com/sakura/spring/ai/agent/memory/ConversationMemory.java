@@ -15,6 +15,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
@@ -25,6 +26,7 @@ public class ConversationMemory {
     private static final String KEY_PREFIX = "mimo:session:";
     private static final String SESSIONS_KEY = "mimo:sessions";
     private static final long REDIS_RETRY_INTERVAL = 60000; // 1 minute
+    private static final long SESSION_TTL_DAYS = 7; // Session TTL: 7 days
 
     private StringRedisTemplate redis;
     private final ObjectMapper objectMapper;
@@ -98,13 +100,20 @@ public class ConversationMemory {
         }
         try {
             String json = serializeMessage(message);
-            redis.opsForList().rightPush(KEY_PREFIX + sessionId, json);
+            if (json == null) {
+                log.warn("Skipping unserializable message for session {}", sessionId);
+                return;
+            }
+            String key = KEY_PREFIX + sessionId;
+            redis.opsForList().rightPush(key, json);
             // Track session
             redis.opsForSet().add(SESSIONS_KEY, sessionId);
+            // Set TTL on session key (refresh on each add)
+            redis.expire(key, SESSION_TTL_DAYS, TimeUnit.DAYS);
             // Trim if needed
-            Long size = redis.opsForList().size(KEY_PREFIX + sessionId);
+            Long size = redis.opsForList().size(key);
             if (size != null && size > maxMessages) {
-                redis.opsForList().trim(KEY_PREFIX + sessionId, size - maxMessages, -1);
+                redis.opsForList().trim(key, size - maxMessages, -1);
             }
         } catch (Exception e) {
             log.error("Failed to add message to Redis for session {}: {}", sessionId, e.getMessage());
@@ -126,6 +135,32 @@ public class ConversationMemory {
                 .responses(List.of(new ToolResponseMessage.ToolResponse(toolCallId, toolName, result)))
                 .metadata(Map.of())
                 .build());
+    }
+
+    public void removeLastMessages(String sessionId, int count) {
+        if (!isRedisAvailable()) {
+            List<Message> messages = inMemoryFallback.get(sessionId);
+            if (messages != null && messages.size() >= count) {
+                for (int i = 0; i < count; i++) {
+                    messages.remove(messages.size() - 1);
+                }
+            }
+            return;
+        }
+        try {
+            Long size = redis.opsForList().size(KEY_PREFIX + sessionId);
+            if (size != null && size >= count) {
+                redis.opsForList().trim(KEY_PREFIX + sessionId, 0, size - count - 1);
+            }
+        } catch (Exception e) {
+            log.error("Failed to remove last {} messages from session {}: {}", count, sessionId, e.getMessage());
+            List<Message> messages = inMemoryFallback.get(sessionId);
+            if (messages != null && messages.size() >= count) {
+                for (int i = 0; i < count; i++) {
+                    messages.remove(messages.size() - 1);
+                }
+            }
+        }
     }
 
     public void clearSession(String sessionId) {
@@ -179,6 +214,7 @@ public class ConversationMemory {
             if (message instanceof AssistantMessage am && am.getToolCalls() != null && !am.getToolCalls().isEmpty()) {
                 data.put("toolCalls", am.getToolCalls().stream().map(tc -> Map.of(
                         "id", tc.id(),
+                        "type", tc.type(),
                         "name", tc.name(),
                         "arguments", tc.arguments()
                 )).toList());
@@ -194,7 +230,17 @@ public class ConversationMemory {
 
             return objectMapper.writeValueAsString(data);
         } catch (JsonProcessingException e) {
-            return "{\"type\":\"USER\",\"text\":\"" + message.getText().replace("\"", "\\\"") + "\"}";
+            log.error("Failed to serialize message, skipping: {}", e.getMessage());
+            // 使用 ObjectMapper 序列化最小数据，失败则返回 null
+            try {
+                Map<String, Object> fallback = new LinkedHashMap<>();
+                fallback.put("type", message.getMessageType().name());
+                fallback.put("text", message.getText() != null ? message.getText() : "");
+                return objectMapper.writeValueAsString(fallback);
+            } catch (Exception ex) {
+                log.error("Fallback serialization also failed: {}", ex.getMessage());
+                return null;
+            }
         }
     }
 
@@ -207,8 +253,21 @@ public class ConversationMemory {
             return switch (type) {
                 case "USER" -> new UserMessage(text);
                 case "ASSISTANT" -> {
-                    AssistantMessage msg = new AssistantMessage(text);
-                    yield msg;
+                    List<Map<String, Object>> toolCalls = (List<Map<String, Object>>) data.get("toolCalls");
+                    if (toolCalls != null && !toolCalls.isEmpty()) {
+                        List<AssistantMessage.ToolCall> tcList = toolCalls.stream()
+                                .map(tc -> new AssistantMessage.ToolCall(
+                                        (String) tc.get("id"),
+                                        (String) tc.getOrDefault("type", "function"),
+                                        (String) tc.get("name"),
+                                        (String) tc.get("arguments")
+                                )).toList();
+                        yield AssistantMessage.builder()
+                                .content(text)
+                                .toolCalls(tcList)
+                                .build();
+                    }
+                    yield new AssistantMessage(text);
                 }
                 case "SYSTEM" -> new SystemMessage(text);
                 case "TOOL" -> {
@@ -230,7 +289,8 @@ public class ConversationMemory {
                 default -> new UserMessage(text);
             };
         } catch (Exception e) {
-            return new UserMessage(json);
+            log.warn("Failed to deserialize message, wrapping as SystemMessage: {}", e.getMessage());
+            return new SystemMessage("[Corrupted message]");
         }
     }
 }

@@ -3,7 +3,6 @@ package com.sakura.spring.ai.agent.cli;
 import com.sakura.spring.ai.agent.MiMoAgent;
 import com.sakura.spring.ai.agent.tool.Tool;
 import com.sakura.spring.ai.agent.tool.ToolRegistry;
-import java.util.Map;
 
 import java.util.List;
 import java.util.Map;

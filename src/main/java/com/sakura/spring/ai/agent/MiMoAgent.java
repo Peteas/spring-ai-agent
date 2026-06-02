@@ -45,7 +45,12 @@ public class MiMoAgent {
      */
     public Flux<AgentEvent> chatStream(String sessionId, String userMessage) {
         log.info("Chat session {} - User message length: {}", sessionId, userMessage.length());
-        memory.addUserMessage(sessionId, userMessage);
+        // 去重：避免网络重试时重复添加相同用户消息
+        List<Message> existing = memory.getMessages(sessionId);
+        if (existing.isEmpty() || !(existing.get(existing.size() - 1) instanceof UserMessage um)
+                || !um.getText().equals(userMessage)) {
+            memory.addUserMessage(sessionId, userMessage);
+        }
         String systemPrompt = SystemPrompt.build(Path.of(System.getProperty("user.dir")));
 
         List<Message> messages = new ArrayList<>();
@@ -101,10 +106,12 @@ public class MiMoAgent {
                             toolCallRound[0]++;
                             log.debug("Session {} - Tool call round {}/{}", sessionId, toolCallRound[0], MAX_TOOL_CALL_ROUNDS);
 
-                            messages.add(AssistantMessage.builder()
+                            AssistantMessage toolCallMsg = AssistantMessage.builder()
                                     .content(contentBuilder.toString())
                                     .toolCalls(accumulatedToolCalls)
-                                    .build());
+                                    .build();
+                            messages.add(toolCallMsg);
+                            memory.addMessage(sessionId, toolCallMsg);
 
                             List<AgentEvent> toolEvents = new ArrayList<>();
                             for (var tc : accumulatedToolCalls) {
@@ -114,10 +121,12 @@ public class MiMoAgent {
                                         parseArguments(tc.arguments()));
                                 toolEvents.add(AgentEvent.toolResult(tc.name(),
                                         result.output(), result.isError()));
-                                messages.add(ToolResponseMessage.builder()
+                                ToolResponseMessage toolRespMsg = ToolResponseMessage.builder()
                                         .responses(List.of(new ToolResponseMessage.ToolResponse(
                                                 tc.id(), tc.name(), result.output())))
-                                        .build());
+                                        .build();
+                                messages.add(toolRespMsg);
+                                memory.addMessage(sessionId, toolRespMsg);
                             }
                             return Flux.fromIterable(toolEvents);
                         } else {
