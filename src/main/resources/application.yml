@@ -28,23 +28,23 @@ spring:
           max-active: 8
           max-idle: 8
           min-idle: 0
-          max-wait: -1
+          max-wait: 3000
   # PostgreSQL 配置（用户数据存储）
   datasource:
-    url: jdbc:postgresql://localhost:5432/postgres
-    username: admin
-    password: admin
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/postgres}
+    username: ${DB_USERNAME:admin}
+    password: ${DB_PASSWORD:admin}
     driver-class-name: org.postgresql.Driver
   sql:
     init:
-      mode: always
+      mode: ${SQL_INIT_MODE:always}
       schema-locations: classpath:schema.sql
 
 # MyBatis-Plus 配置
 mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true
-    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+    log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
   global-config:
     db-config:
       id-type: auto
@@ -58,6 +58,6 @@ mimo:
     safety-mode: strict
   # JWT 配置
   jwt:
-    secret: ${JWT_SECRET:mimo-agent-jwt-secret-key-that-is-long-enough-for-hs256}
+    secret: ${JWT_SECRET:a8Kj3mN9pQ2rS7tU1vW5xY0zB4cD6eF8gH0iJ2kL4mN6oP8qR0sT2uV4wX6yZ}
     expiration: 86400000  # 24 hours
     refresh-expiration: 604800000  # 7 days

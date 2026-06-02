@@ -53,11 +53,12 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webflux</artifactId>
 		</dependency>
-		<!-- macOS 原生 DNS 解析器（修复 Netty DNS 警告） -->
+		<!-- macOS 原生 DNS 解析器（仅 macOS ARM64） -->
 		<dependency>
 			<groupId>io.netty</groupId>
 			<artifactId>netty-resolver-dns-native-macos</artifactId>
 			<classifier>osx-aarch_64</classifier>
+			<optional>true</optional>
 		</dependency>
 
 		<!-- Spring AI OpenAI 兼容（接入 MiMo） -->
@@ -94,6 +95,12 @@
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-security</artifactId>
+		</dependency>
+
+		<!-- Validation ==================== -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-validation</artifactId>
 		</dependency>
 
 		<!-- JWT ==================== -->

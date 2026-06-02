@@ -6,11 +6,13 @@ import org.springframework.stereotype.Component;
 
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Component
 public class TodoTool implements Tool {
 
     private final List<TodoItem> todos = new CopyOnWriteArrayList<>();
+    private final AtomicInteger idCounter = new AtomicInteger(0);
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
@@ -70,7 +72,7 @@ public class TodoTool implements Tool {
             return ToolResult.error("Task content is required");
         }
 
-        int id = todos.size() + 1;
+        int id = idCounter.incrementAndGet();
         TodoItem item = new TodoItem(id, content, "pending", "activeForm");
         todos.add(item);
         return ToolResult.success("Task created: #" + id + " - " + content);
