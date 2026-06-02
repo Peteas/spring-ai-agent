@@ -28,7 +28,7 @@ public class JwtAuthenticationFilter implements WebFilter {
         if (authHeader != null && authHeader.startsWith("Bearer ")) {
             String token = authHeader.substring(7);
 
-            if (jwtService.isTokenValid(token)) {
+            if (jwtService.isTokenValid(token) && jwtService.isAccessToken(token)) {
                 Long userId = jwtService.getUserIdFromToken(token);
                 String username = jwtService.getUsernameFromToken(token);
 

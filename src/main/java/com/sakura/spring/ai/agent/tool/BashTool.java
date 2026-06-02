@@ -93,15 +93,25 @@ public class BashTool implements Tool {
                 ? ((Number) args.get("timeout")).intValue()
                 : commandTimeout;
 
+        // 预处理：标准化空格，防止 "rm  -rf  /" 等绕过
+        String normalizedCommand = command.replaceAll("\\s+", " ").trim();
+
+        // 检测子 shell 包装
+        String lowerCmd = normalizedCommand.toLowerCase();
+        if (lowerCmd.startsWith("bash -c") || lowerCmd.startsWith("sh -c") ||
+            lowerCmd.startsWith("bash -ic") || lowerCmd.startsWith("sh -ic")) {
+            return ToolResult.error("Subshell execution is not allowed for security reasons");
+        }
+
         // 检查高危命令模式
         for (Pattern pattern : DANGEROUS_PATTERNS) {
-            if (pattern.matcher(command).find()) {
+            if (pattern.matcher(normalizedCommand).find()) {
                 return ToolResult.error("Blocked dangerous command pattern: " + pattern.pattern());
             }
         }
 
         // 检查命令前缀是否在白名单中
-        String firstCommand = extractFirstCommand(command);
+        String firstCommand = extractFirstCommand(normalizedCommand);
         if (firstCommand != null && !SAFE_COMMAND_PREFIXES.contains(firstCommand)) {
             return ToolResult.error("Command not allowed: " + firstCommand + ". Allowed commands: " + SAFE_COMMAND_PREFIXES);
         }
@@ -154,6 +164,7 @@ public class BashTool implements Tool {
 
     /**
      * 提取命令的第一个单词（主命令）
+     * 绝对路径也纳入检测（如 /bin/rm → rm）
      */
     private String extractFirstCommand(String command) {
         String trimmed = command.trim();
@@ -167,8 +178,8 @@ public class BashTool implements Tool {
         // 提取第一个单词
         String[] parts = trimmed.split("\\s+");
         String cmd = parts[0];
-        // 处理路径形式的命令（如 /usr/bin/python）
-        if (cmd.contains("/")) {
+        // 处理绝对路径形式的命令（如 /usr/bin/python → python, /bin/rm → rm）
+        if (cmd.startsWith("/")) {
             cmd = cmd.substring(cmd.lastIndexOf("/") + 1);
         }
         return cmd;

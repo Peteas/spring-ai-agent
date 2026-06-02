@@ -43,10 +43,10 @@ public class AgentController {
                                   @AuthenticationPrincipal JwtUserDetails userDetails) {
         // 校验 message 长度
         if (request.message() == null || request.message().isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "Message is required"));
+            return ResponseEntity.badRequest().body(ApiResponse.error("Message is required"));
         }
         if (request.message().length() > MAX_MESSAGE_LENGTH) {
-            return ResponseEntity.badRequest().body(Map.of("error", "Message too long. Maximum length: " + MAX_MESSAGE_LENGTH));
+            return ResponseEntity.badRequest().body(ApiResponse.error("Message too long. Maximum length: " + MAX_MESSAGE_LENGTH));
         }
 
         // 生成或校验 sessionId
@@ -54,7 +54,7 @@ public class AgentController {
         if (sessionId == null || sessionId.isBlank()) {
             sessionId = "web-" + UUID.randomUUID();
         } else if (!SESSION_ID_PATTERN.matcher(sessionId).matches()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "Invalid sessionId format. Use alphanumeric characters and hyphens, max 64 chars"));
+            return ResponseEntity.badRequest().body(ApiResponse.error("Invalid sessionId format. Use alphanumeric characters and hyphens, max 64 chars"));
         }
 
         // regenerate: 删除最后一轮对话
@@ -105,21 +105,27 @@ public class AgentController {
     }
 
     @DeleteMapping("/sessions/{sessionId}")
-    public Map<String, String> deleteSession(@PathVariable String sessionId,
+    public ResponseEntity<?> deleteSession(@PathVariable String sessionId,
                                              @AuthenticationPrincipal JwtUserDetails userDetails) {
+        if (!isValidSessionId(sessionId)) {
+            return ResponseEntity.badRequest().body(ApiResponse.error("Invalid sessionId format"));
+        }
         agent.clearSession(sessionId);
         if (userDetails != null) {
             userService.removeSession(userDetails.getUserId(), sessionId);
         }
-        return Map.of("status", "ok", "sessionId", sessionId);
+        return ResponseEntity.ok(ApiResponse.success(Map.of("sessionId", sessionId)));
     }
 
     @GetMapping("/sessions/{sessionId}/messages")
     public ResponseEntity<?> getMessages(@PathVariable String sessionId,
                                          @AuthenticationPrincipal JwtUserDetails userDetails) {
+        if (!isValidSessionId(sessionId)) {
+            return ResponseEntity.badRequest().body(ApiResponse.error("Invalid sessionId format"));
+        }
         // 验证 session 所有权
         if (userDetails != null && !userService.isSessionOwner(userDetails.getUserId(), sessionId)) {
-            return ResponseEntity.status(403).body(Map.of("error", "Access denied"));
+            return ResponseEntity.status(403).body(ApiResponse.error(403, "Access denied"));
         }
 
         return ResponseEntity.ok(memory.getMessages(sessionId).stream()
@@ -154,6 +160,10 @@ public class AgentController {
                     return msg;
                 })
                 .toList());
+    }
+
+    private boolean isValidSessionId(String sessionId) {
+        return sessionId != null && SESSION_ID_PATTERN.matcher(sessionId).matches();
     }
 
     public record ChatRequest(String message, String sessionId, Boolean regenerate) {}
