@@ -9,9 +9,11 @@ import com.sakura.spring.ai.agent.mapper.UserSessionMapper;
 import com.sakura.spring.ai.agent.model.User;
 import com.sakura.spring.ai.agent.model.UserSession;
 import com.sakura.spring.ai.agent.security.JwtService;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.HashMap;
 import java.util.List;
@@ -39,6 +41,7 @@ public class UserService {
         this.redisTemplate = redisTemplate;
     }
 
+    @Transactional
     public Map<String, Object> register(String username, String password, String email) {
         // 检查用户名是否已存在
         LambdaQueryWrapper<User> wrapper = new LambdaQueryWrapper<>();
@@ -63,6 +66,7 @@ public class UserService {
         return result;
     }
 
+    @Transactional
     public Map<String, Object> login(String username, String password) {
         // 查找用户
         LambdaQueryWrapper<User> wrapper = new LambdaQueryWrapper<>();
@@ -85,6 +89,7 @@ public class UserService {
         return result;
     }
 
+    @Transactional
     public Map<String, Object> refreshToken(String refreshToken) {
         if (!jwtService.isTokenValid(refreshToken)) {
             throw new TokenExpiredException();
@@ -134,13 +139,11 @@ public class UserService {
     }
 
     public void associateSession(Long userId, String sessionId) {
-        // 检查是否已关联
-        LambdaQueryWrapper<UserSession> wrapper = new LambdaQueryWrapper<>();
-        wrapper.eq(UserSession::getUserId, userId)
-               .eq(UserSession::getSessionId, sessionId);
-        if (userSessionMapper.selectCount(wrapper) == 0) {
+        try {
             UserSession userSession = new UserSession(userId, sessionId);
             userSessionMapper.insert(userSession);
+        } catch (DuplicateKeyException e) {
+            // Already associated — ignore
         }
     }
 
