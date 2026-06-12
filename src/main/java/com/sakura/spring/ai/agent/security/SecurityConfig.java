@@ -33,6 +33,8 @@ public class SecurityConfig {
                 .authorizeExchange(exchanges -> exchanges
                         // 公开的认证接口
                         .pathMatchers("/api/auth/**").permitAll()
+                        // 健康检查
+                        .pathMatchers("/health").permitAll()
                         // 静态资源
                         .pathMatchers("/", "/*.html", "/*.css", "/*.js", "/static/**").permitAll()
                         // 其他接口需要认证
