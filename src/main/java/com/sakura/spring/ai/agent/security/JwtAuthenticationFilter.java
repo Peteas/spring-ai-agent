@@ -28,19 +28,24 @@ public class JwtAuthenticationFilter implements WebFilter {
         if (authHeader != null && authHeader.startsWith("Bearer ")) {
             String token = authHeader.substring(7);
 
-            if (jwtService.isTokenValid(token) && jwtService.isAccessToken(token)) {
-                Long userId = jwtService.getUserIdFromToken(token);
-                String username = jwtService.getUsernameFromToken(token);
+            try {
+                if (jwtService.isTokenValid(token) && jwtService.isAccessToken(token)) {
+                    io.jsonwebtoken.Claims claims = jwtService.parseToken(token);
+                    Long userId = Long.parseLong(claims.getSubject());
+                    String username = claims.get("username", String.class);
 
-                JwtUserDetails userDetails = new JwtUserDetails(userId, username);
+                    JwtUserDetails userDetails = new JwtUserDetails(userId, username);
 
-                UsernamePasswordAuthenticationToken authentication =
-                        new UsernamePasswordAuthenticationToken(userDetails, null, List.of());
+                    UsernamePasswordAuthenticationToken authentication =
+                            new UsernamePasswordAuthenticationToken(userDetails, null, List.of());
 
-                SecurityContextImpl securityContext = new SecurityContextImpl(authentication);
+                    SecurityContextImpl securityContext = new SecurityContextImpl(authentication);
 
-                return chain.filter(exchange)
-                        .contextWrite(ReactiveSecurityContextHolder.withSecurityContext(Mono.just(securityContext)));
+                    return chain.filter(exchange)
+                            .contextWrite(ReactiveSecurityContextHolder.withSecurityContext(Mono.just(securityContext)));
+                }
+            } catch (Exception ignored) {
+                // Invalid token — proceed as unauthenticated
             }
         }
 

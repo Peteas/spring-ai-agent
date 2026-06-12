@@ -169,7 +169,7 @@ public class BashTool implements Tool {
     private String extractFirstCommand(String command) {
         String trimmed = command.trim();
         // 跳过环境变量设置（如 VAR=value command）
-        if (trimmed.matches("^[A-Z_][A-Z0-9_]*=.*")) {
+        if (trimmed.matches("^[a-zA-Z_][a-zA-Z0-9_]*=.*")) {
             String[] parts = trimmed.split("\\s+", 2);
             if (parts.length > 1) {
                 trimmed = parts[1];

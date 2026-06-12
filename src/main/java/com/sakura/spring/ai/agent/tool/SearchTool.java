@@ -12,6 +12,8 @@ import java.util.stream.Stream;
 @Component
 public class SearchTool implements Tool {
 
+    private static final Path WORKING_DIR = Paths.get(System.getProperty("user.dir")).toAbsolutePath().normalize();
+
     @Override
     public String name() {
         return "search";
@@ -73,22 +75,26 @@ public class SearchTool implements Tool {
 
     private ToolResult globSearch(String pattern, String searchPath, int maxResults) {
         Path basePath = Paths.get(searchPath).normalize();
-        if (!Files.exists(basePath)) {
-            return ToolResult.error("Search path not found: " + basePath);
+        Path resolvedPath = WORKING_DIR.resolve(basePath).normalize();
+        if (!resolvedPath.startsWith(WORKING_DIR)) {
+            return ToolResult.error("Access denied: path outside working directory");
+        }
+        if (!Files.exists(resolvedPath)) {
+            return ToolResult.error("Search path not found: " + resolvedPath);
         }
 
         try {
             PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:" + pattern);
             List<String> matches = new ArrayList<>();
 
-            try (Stream<Path> walk = Files.walk(basePath)) {
+            try (Stream<Path> walk = Files.walk(resolvedPath)) {
                 walk.filter(Files::isRegularFile)
                         .filter(p -> {
-                            Path relativePath = basePath.relativize(p);
+                            Path relativePath = resolvedPath.relativize(p);
                             return matcher.matches(relativePath) || matcher.matches(p.getFileName());
                         })
                         .limit(maxResults)
-                        .forEach(p -> matches.add(basePath.relativize(p).toString()));
+                        .forEach(p -> matches.add(resolvedPath.relativize(p).toString()));
             }
 
             if (matches.isEmpty()) {
@@ -103,8 +109,12 @@ public class SearchTool implements Tool {
 
     private ToolResult grepSearch(String regex, String searchPath, Map<String, Object> args, int maxResults) {
         Path basePath = Paths.get(searchPath).normalize();
-        if (!Files.exists(basePath)) {
-            return ToolResult.error("Search path not found: " + basePath);
+        Path resolvedPath = WORKING_DIR.resolve(basePath).normalize();
+        if (!resolvedPath.startsWith(WORKING_DIR)) {
+            return ToolResult.error("Access denied: path outside working directory");
+        }
+        if (!Files.exists(resolvedPath)) {
+            return ToolResult.error("Search path not found: " + resolvedPath);
         }
 
         String globFilter = (String) args.get("glob_filter");
@@ -123,14 +133,14 @@ public class SearchTool implements Tool {
                 : null;
 
         List<String> results = new ArrayList<>();
-        try (Stream<Path> walk = Files.walk(basePath)) {
+        try (Stream<Path> walk = Files.walk(resolvedPath)) {
             walk.filter(Files::isRegularFile)
                     .filter(p -> !isBinaryFile(p))
                     .filter(p -> fileFilter == null || fileFilter.matches(p.getFileName()))
                     .forEach(p -> {
                         if (results.size() >= maxResults) return;
                         try (var reader = Files.newBufferedReader(p)) {
-                            String relative = basePath.relativize(p).toString();
+                            String relative = resolvedPath.relativize(p).toString();
                             String line;
                             int lineNum = 0;
                             while ((line = reader.readLine()) != null && results.size() < maxResults) {

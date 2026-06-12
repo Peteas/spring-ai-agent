@@ -20,6 +20,7 @@ import reactor.util.retry.Retry;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Service
 public class MiMoAgent {
@@ -58,14 +59,14 @@ public class MiMoAgent {
         messages.addAll(memory.getMessages(sessionId));
         List<ToolCallback> toolCallbacks = toolRegistry.getToolCallbacks();
 
-        final int[] toolCallRound = {0};
+        final AtomicInteger toolCallRound = new AtomicInteger(0);
 
         return Flux.defer(() -> {
             List<AssistantMessage.ToolCall> accumulatedToolCalls = new ArrayList<>();
             StringBuilder contentBuilder = new StringBuilder();
 
             // 检查工具调用轮次限制
-            if (toolCallRound[0] >= MAX_TOOL_CALL_ROUNDS) {
+            if (toolCallRound.get() >= MAX_TOOL_CALL_ROUNDS) {
                 log.warn("Session {} reached maximum tool call rounds ({})", sessionId, MAX_TOOL_CALL_ROUNDS);
                 return Flux.just(AgentEvent.error("Maximum tool call rounds reached (" + MAX_TOOL_CALL_ROUNDS + "). Stopping to prevent infinite loop."));
             }
@@ -78,7 +79,16 @@ public class MiMoAgent {
 
             return chatModel.stream(prompt)
                     .retryWhen(Retry.backoff(3, Duration.ofSeconds(2))
-                            .filter(ex -> ex.getMessage() != null && ex.getMessage().contains("GOAWAY"))
+                            .filter(ex -> {
+                                String msg = ex.getMessage();
+                                if (msg == null) return false;
+                                return msg.contains("GOAWAY")
+                                        || msg.contains("Connection reset")
+                                        || msg.contains("timeout")
+                                        || msg.contains("503")
+                                        || msg.contains("502")
+                                        || msg.contains("429");
+                            })
                             .onRetryExhaustedThrow((spec, signal) -> signal.failure()))
                     .concatMap(response -> {
                         if (response.getResult() == null) return Flux.empty();
@@ -103,8 +113,8 @@ public class MiMoAgent {
                     })
                     .concatWith(Flux.defer(() -> {
                         if (!accumulatedToolCalls.isEmpty()) {
-                            toolCallRound[0]++;
-                            log.debug("Session {} - Tool call round {}/{}", sessionId, toolCallRound[0], MAX_TOOL_CALL_ROUNDS);
+                            toolCallRound.incrementAndGet();
+                            log.debug("Session {} - Tool call round {}/{}", sessionId, toolCallRound.get(), MAX_TOOL_CALL_ROUNDS);
 
                             AssistantMessage toolCallMsg = AssistantMessage.builder()
                                     .content(contentBuilder.toString())
