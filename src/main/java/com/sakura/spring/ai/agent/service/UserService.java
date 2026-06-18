@@ -89,6 +89,7 @@ public class UserService {
         return result;
     }
 
+    // 旧 refresh token 作废，生成新 token 对
     @Transactional
     public Map<String, Object> refreshToken(String refreshToken) {
         if (!jwtService.isTokenValid(refreshToken)) {
@@ -138,6 +139,7 @@ public class UserService {
         return userMapper.selectById(userId);
     }
 
+    // 忽略重复关联
     public void associateSession(Long userId, String sessionId) {
         try {
             UserSession userSession = new UserSession(userId, sessionId);

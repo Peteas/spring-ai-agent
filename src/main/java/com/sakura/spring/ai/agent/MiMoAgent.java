@@ -3,6 +3,7 @@ package com.sakura.spring.ai.agent;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sakura.spring.ai.agent.memory.ConversationMemory;
+import com.sakura.spring.ai.agent.service.ChatLogService;
 import com.sakura.spring.ai.agent.tool.Tool;
 import com.sakura.spring.ai.agent.tool.ToolRegistry;
 import org.slf4j.Logger;
@@ -31,13 +32,15 @@ public class MiMoAgent {
     private final ChatModel chatModel;
     private final ToolRegistry toolRegistry;
     private final ConversationMemory memory;
+    private final ChatLogService chatLogService;
     private final ObjectMapper objectMapper;
 
     public MiMoAgent(ChatModel chatModel, ToolRegistry toolRegistry,
-                     ConversationMemory memory) {
+                     ConversationMemory memory, ChatLogService chatLogService) {
         this.chatModel = chatModel;
         this.toolRegistry = toolRegistry;
         this.memory = memory;
+        this.chatLogService = chatLogService;
         this.objectMapper = new ObjectMapper();
     }
 
@@ -60,6 +63,10 @@ public class MiMoAgent {
         List<ToolCallback> toolCallbacks = toolRegistry.getToolCallbacks();
 
         final AtomicInteger toolCallRound = new AtomicInteger(0);
+        final AtomicInteger totalPromptTokens = new AtomicInteger(0);
+        final AtomicInteger totalCompletionTokens = new AtomicInteger(0);
+        final AtomicInteger totalTokens = new AtomicInteger(0);
+        long startTime = System.currentTimeMillis();
 
         return Flux.defer(() -> {
             List<AssistantMessage.ToolCall> accumulatedToolCalls = new ArrayList<>();
@@ -91,6 +98,14 @@ public class MiMoAgent {
                             })
                             .onRetryExhaustedThrow((spec, signal) -> signal.failure()))
                     .concatMap(response -> {
+                        // 提取 token usage
+                        if (response.getMetadata() != null && response.getMetadata().getUsage() != null) {
+                            var usage = response.getMetadata().getUsage();
+                            if (usage.getPromptTokens() != null) totalPromptTokens.set(usage.getPromptTokens());
+                            if (usage.getCompletionTokens() != null) totalCompletionTokens.set(usage.getCompletionTokens());
+                            if (usage.getTotalTokens() != null) totalTokens.set(usage.getTotalTokens());
+                        }
+
                         if (response.getResult() == null) return Flux.empty();
                         AssistantMessage output = response.getResult().getOutput();
                         List<AgentEvent> events = new ArrayList<>();
@@ -143,9 +158,22 @@ public class MiMoAgent {
                             String answer = contentBuilder.toString();
                             if (!answer.isEmpty()) {
                                 memory.addAssistantMessage(sessionId, answer);
-                                log.info("Session {} - Response length: {}", sessionId, answer.length());
+                                log.info("Session {} - Response length: {}, tokens: prompt={}, completion={}, total={}",
+                                        sessionId, answer.length(),
+                                        totalPromptTokens.get(), totalCompletionTokens.get(), totalTokens.get());
                             }
-                            return Flux.just(AgentEvent.done());
+                            // 异步记录对话日志
+                            long latency = System.currentTimeMillis() - startTime;
+                            List<String> toolNames = toolCallRound.get() > 0
+                                    ? accumulatedToolCalls.stream().map(AssistantMessage.ToolCall::name).toList()
+                                    : List.of();
+                            chatLogService.saveChatLog(null, sessionId, userMessage, answer,
+                                    totalPromptTokens.get(), totalCompletionTokens.get(), totalTokens.get(),
+                                    toolNames, accumulatedToolCalls.size(), toolCallRound.get(),
+                                    latency, "mimo-v2.5-pro", null);
+
+                            return Flux.just(AgentEvent.doneWithUsage(
+                                    totalPromptTokens.get(), totalCompletionTokens.get(), totalTokens.get()));
                         }
                     }));
         })
@@ -154,6 +182,10 @@ public class MiMoAgent {
                 || event.type() == AgentEvent.EventType.ERROR)
         .onErrorResume(e -> {
             log.error("Session {} - Agent error: {}", sessionId, e.getMessage(), e);
+            long latency = System.currentTimeMillis() - startTime;
+            chatLogService.saveChatLog(null, sessionId, userMessage, null,
+                    totalPromptTokens.get(), totalCompletionTokens.get(), totalTokens.get(),
+                    List.of(), 0, toolCallRound.get(), latency, "mimo-v2.5-pro", e.getMessage());
             return Flux.just(AgentEvent.error("Agent error: " + e.getMessage()));
         });
     }
@@ -225,31 +257,36 @@ public class MiMoAgent {
 
     public record AgentResponse(String content, boolean success) {}
 
-    public record AgentEvent(EventType type, String toolName, String content, boolean isError) {
+    public record AgentEvent(EventType type, String toolName, String content, boolean isError,
+                             int promptTokens, int completionTokens, int totalTokens) {
         public enum EventType { THINKING, TOOL_CALL, TOOL_RESULT, ANSWER_CHUNK, DONE, ERROR }
 
         public static AgentEvent thinking(String content) {
-            return new AgentEvent(EventType.THINKING, null, content, false);
+            return new AgentEvent(EventType.THINKING, null, content, false, 0, 0, 0);
         }
 
         public static AgentEvent toolCall(String name, String args) {
-            return new AgentEvent(EventType.TOOL_CALL, name, args, false);
+            return new AgentEvent(EventType.TOOL_CALL, name, args, false, 0, 0, 0);
         }
 
         public static AgentEvent toolResult(String name, String output, boolean isError) {
-            return new AgentEvent(EventType.TOOL_RESULT, name, output, isError);
+            return new AgentEvent(EventType.TOOL_RESULT, name, output, isError, 0, 0, 0);
         }
 
         public static AgentEvent answerChunk(String content) {
-            return new AgentEvent(EventType.ANSWER_CHUNK, null, content, false);
+            return new AgentEvent(EventType.ANSWER_CHUNK, null, content, false, 0, 0, 0);
         }
 
         public static AgentEvent done() {
-            return new AgentEvent(EventType.DONE, null, "", false);
+            return new AgentEvent(EventType.DONE, null, "", false, 0, 0, 0);
+        }
+
+        public static AgentEvent doneWithUsage(int promptTokens, int completionTokens, int totalTokens) {
+            return new AgentEvent(EventType.DONE, null, "", false, promptTokens, completionTokens, totalTokens);
         }
 
         public static AgentEvent error(String message) {
-            return new AgentEvent(EventType.ERROR, null, message, true);
+            return new AgentEvent(EventType.ERROR, null, message, true, 0, 0, 0);
         }
     }
 }

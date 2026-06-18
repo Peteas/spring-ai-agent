@@ -10,6 +10,7 @@ public interface Tool {
 
     String description();
 
+    // 返回 JSON Schema 格式的参数定义
     Map<String, Object> parameters();
 
     ToolResult execute(Map<String, Object> args);

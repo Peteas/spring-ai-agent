@@ -3,16 +3,19 @@ package com.sakura.spring.ai.agent.model;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import lombok.Data;
+
 import java.time.LocalDateTime;
 
+@Data
 @TableName("user_sessions")
 public class UserSession {
 
     @TableId(type = IdType.AUTO)
-    private Long id;
-    private Long userId;
-    private String sessionId;
-    private LocalDateTime createdAt;
+    private Long id;             // 自增主键
+    private Long userId;         // 关联的用户
+    private String sessionId;    // 前端生成的会话ID
+    private LocalDateTime createdAt; // 绑定时间
 
     public UserSession() {}
 
@@ -21,16 +24,4 @@ public class UserSession {
         this.sessionId = sessionId;
         this.createdAt = LocalDateTime.now();
     }
-
-    public Long getId() { return id; }
-    public void setId(Long id) { this.id = id; }
-
-    public Long getUserId() { return userId; }
-    public void setUserId(Long userId) { this.userId = userId; }
-
-    public String getSessionId() { return sessionId; }
-    public void setSessionId(String sessionId) { this.sessionId = sessionId; }
-
-    public LocalDateTime getCreatedAt() { return createdAt; }
-    public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
 }

@@ -38,6 +38,7 @@ public class AgentController {
         this.userService = userService;
     }
 
+    // SSE 流式聊天，合并心跳保活
     @PostMapping(value = "/chat", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public ResponseEntity<?> chat(@RequestBody ChatRequest request,
                                   @AuthenticationPrincipal JwtUserDetails userDetails) {
