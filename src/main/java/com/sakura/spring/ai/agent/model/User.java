@@ -3,17 +3,20 @@ package com.sakura.spring.ai.agent.model;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import lombok.Data;
+
 import java.time.LocalDateTime;
 
+@Data
 @TableName("users")
 public class User {
 
     @TableId(type = IdType.AUTO)
-    private Long id;
-    private String username;
-    private String passwordHash;
-    private String email;
-    private LocalDateTime createdAt;
+    private Long id;             // 自增主键
+    private String username;     // 登录用的用户名，不能重复
+    private String passwordHash; // 密码不存明文，只存 bcrypt hash
+    private String email;        // 邮箱，选填
+    private LocalDateTime createdAt; // 注册时间，创建时自动填
 
     public User() {}
 
@@ -23,19 +26,4 @@ public class User {
         this.email = email;
         this.createdAt = LocalDateTime.now();
     }
-
-    public Long getId() { return id; }
-    public void setId(Long id) { this.id = id; }
-
-    public String getUsername() { return username; }
-    public void setUsername(String username) { this.username = username; }
-
-    public String getPasswordHash() { return passwordHash; }
-    public void setPasswordHash(String passwordHash) { this.passwordHash = passwordHash; }
-
-    public String getEmail() { return email; }
-    public void setEmail(String email) { this.email = email; }
-
-    public LocalDateTime getCreatedAt() { return createdAt; }
-    public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
 }
