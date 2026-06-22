@@ -9,8 +9,8 @@ import com.sakura.spring.ai.agent.mapper.UserSessionMapper;
 import com.sakura.spring.ai.agent.model.User;
 import com.sakura.spring.ai.agent.model.UserSession;
 import com.sakura.spring.ai.agent.security.JwtService;
+import com.sakura.spring.ai.agent.security.TokenBlacklistService;
 import org.springframework.dao.DuplicateKeyException;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -23,22 +23,20 @@ import java.util.concurrent.TimeUnit;
 @Service
 public class UserService {
 
-    private static final String TOKEN_BLACKLIST_PREFIX = "mimo:token:blacklist:";
-
     private final UserMapper userMapper;
     private final UserSessionMapper userSessionMapper;
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
-    private final StringRedisTemplate redisTemplate;
+    private final TokenBlacklistService tokenBlacklistService;
 
     public UserService(UserMapper userMapper, UserSessionMapper userSessionMapper,
                        PasswordEncoder passwordEncoder, JwtService jwtService,
-                       StringRedisTemplate redisTemplate) {
+                       TokenBlacklistService tokenBlacklistService) {
         this.userMapper = userMapper;
         this.userSessionMapper = userSessionMapper;
         this.passwordEncoder = passwordEncoder;
         this.jwtService = jwtService;
-        this.redisTemplate = redisTemplate;
+        this.tokenBlacklistService = tokenBlacklistService;
     }
 
     @Transactional
@@ -99,15 +97,14 @@ public class UserService {
             throw new TokenExpiredException();
         }
         // 检查 token 是否在黑名单中
-        if (isTokenBlacklisted(refreshToken)) {
+        if (tokenBlacklistService.isBlacklisted(refreshToken)) {
             throw new TokenExpiredException();
         }
 
         Long userId = jwtService.getUserIdFromToken(refreshToken);
         String username = jwtService.getUsernameFromToken(refreshToken);
 
-        // 将旧 refresh token 加入黑名单（7天过期，与 refresh token 有效期一致）
-        blacklistToken(refreshToken, 7, TimeUnit.DAYS);
+        tokenBlacklistService.blacklist(refreshToken, 7, TimeUnit.DAYS);
 
         // 生成新的 access + refresh token 对
         String newAccessToken = jwtService.generateToken(userId, username);
@@ -119,20 +116,19 @@ public class UserService {
         return result;
     }
 
-    private void blacklistToken(String token, long timeout, TimeUnit unit) {
-        try {
-            redisTemplate.opsForValue().set(TOKEN_BLACKLIST_PREFIX + token, "1", timeout, unit);
-        } catch (Exception e) {
-            // Redis 不可用时忽略，降级为不黑名单
+    public void logout(String accessToken, String refreshToken) {
+        if (accessToken != null) {
+            tokenBlacklistService.blacklist(accessToken, 24, TimeUnit.HOURS);
+        }
+        if (refreshToken != null) {
+            tokenBlacklistService.blacklist(refreshToken, 7, TimeUnit.DAYS);
         }
     }
 
-    private boolean isTokenBlacklisted(String token) {
-        try {
-            return Boolean.TRUE.equals(redisTemplate.hasKey(TOKEN_BLACKLIST_PREFIX + token));
-        } catch (Exception e) {
-            return false;
-        }
+    public boolean isSessionOwnedByAnyone(String sessionId) {
+        LambdaQueryWrapper<UserSession> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(UserSession::getSessionId, sessionId);
+        return userSessionMapper.selectCount(wrapper) > 0;
     }
 
     public User getUserById(Long userId) {

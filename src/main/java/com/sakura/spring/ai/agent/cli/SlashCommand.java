@@ -6,6 +6,7 @@ import com.sakura.spring.ai.agent.tool.ToolRegistry;
 
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 public class SlashCommand {
 
@@ -69,7 +70,7 @@ public class SlashCommand {
     }
 
     private void newSession() {
-        currentSessionId = "session-" + System.currentTimeMillis();
+        currentSessionId = "session-" + UUID.randomUUID();
         agent.clearSession(currentSessionId);
         renderer.printInfo("New session started: " + currentSessionId);
     }

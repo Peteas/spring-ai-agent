@@ -1,4 +1,4 @@
-# AGENTS.md
+
 
 ## Project Overview
 
@@ -23,7 +23,8 @@ Copy `.env.example` to `.env` and set:
 | `JWT_SECRET` | Yes | At least 32 bytes |
 | `DB_URL` | Yes | PostgreSQL, default `jdbc:postgresql://localhost:5432/postgres` |
 | `DB_USERNAME` / `DB_PASSWORD` | Yes | PostgreSQL credentials |
-| `REDIS_HOST` / `REDIS_PORT` | No | Falls back to in-memory if unavailable |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | No | Falls back to in-memory if unavailable |
+| `MIMO_BASE_URL` | No | MiMo API base URL, default `https://token-plan-cn.xiaomimimo.com/v1` |
 | `SQL_INIT_MODE` | No | `always` (default) or `never` — controls schema.sql auto-init |
 
 ## Architecture
@@ -34,14 +35,17 @@ Base package: `com.sakura.spring.ai.agent`
 - **SystemPrompt.java** — cached system prompt (60s TTL), injected per request
 - **ToolRegistry.java** — auto-discovers all `Tool` beans, dispatches execution
 - **Tool implementations** (all in `tool/`):
-  - `BashTool` — shell execution with dangerous command blocklist + safe command whitelist
+  - `BashTool` — shell execution with dangerous command blocklist + safe command whitelist; output truncated at 30KB
   - `FileTool` — read/write/edit/list, restricted to working directory
-  - `GitTool`, `SearchTool` — path traversal protected, confined to working directory
+  - `GitTool` — path traversal protected; output truncated at 30KB
+  - `SearchTool` — glob/grep, path traversal protected
+  - `TodoTool` — in-memory only, not persisted across restarts
 - **ConversationMemory.java** — Redis-backed session storage with in-memory fallback (7-day TTL, max 50 messages)
 - **AgentController.java** — REST API: `/api/chat` (SSE), `/api/sessions`, `/api/sessions/{id}/messages`
 - **HealthController.java** — `/health` endpoint (no auth required)
 - **AuthController.java** — `/api/auth/register`, `/api/auth/login`, `/api/auth/refresh`
 - **SecurityConfig.java** — WebFlux security, JWT filter, CORS (localhost:5173, localhost:3000), `/health` public
+- **RateLimitFilter.java** — Redis-based rate limiting on auth endpoints (silently skips if Redis unavailable)
 
 ## Infrastructure Dependencies
 
@@ -53,6 +57,8 @@ Base package: `com.sakura.spring.ai.agent`
 
 - Spring profile: `mimo` (active by default)
 - MyBatis-Plus for ORM, underscore-to-camel-case mapping
+- `@MapperScan("com.sakura.spring.ai.agent.mapper")` on main class — MyBatis mapper interfaces auto-discovered
+- MiMo API accessed via Spring AI's OpenAI-compatible starter (`spring-ai-starter-model-openai`)
 - SSE heartbeat every 30s to keep connections alive
 - `BashTool` blocks subshell (`bash -c`, `sh -c`) and destructive patterns (rm /, mkfs, etc.)
 - `FileTool` and `SearchTool` enforce path traversal protection — all file ops confined to working directory
@@ -80,3 +86,6 @@ Tests require a running PostgreSQL and (optionally) Redis. The only existing tes
 - CORS only allows `localhost:5173` and `localhost:3000` — adjust `SecurityConfig` for other origins
 - No CI/CD pipeline configured — no `.github/workflows` directory exists
 - The `config/` package is empty — configuration is via `application.yml` + Spring auto-config
+- `TodoTool` is in-memory only — tasks don't survive restarts
+- Rate limiting on auth endpoints requires Redis — silently disabled when Redis is unavailable
+- Netty `netty-resolver-dns-native-macos` (osx-aarch_64) is an optional dependency — won't break other platforms

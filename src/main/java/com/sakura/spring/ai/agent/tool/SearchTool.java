@@ -1,5 +1,6 @@
 package com.sakura.spring.ai.agent.tool;
 
+import com.sakura.spring.ai.agent.config.AgentProperties;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -9,10 +10,22 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static java.nio.file.FileVisitOption.FOLLOW_LINKS;
+
 @Component
 public class SearchTool implements Tool {
 
-    private static final Path WORKING_DIR = Paths.get(System.getProperty("user.dir")).toAbsolutePath().normalize();
+    private final AgentProperties agentProperties;
+    private static final int MAX_WALK_DEPTH = 10;
+    private static final Set<String> SKIP_DIRS = Set.of(".git", "node_modules", "target", ".idea", ".vscode", "build", "dist");
+
+    public SearchTool(AgentProperties agentProperties) {
+        this.agentProperties = agentProperties;
+    }
+
+    private Path workingDir() {
+        return agentProperties.getWorkingDirPath();
+    }
 
     @Override
     public String name() {
@@ -75,8 +88,8 @@ public class SearchTool implements Tool {
 
     private ToolResult globSearch(String pattern, String searchPath, int maxResults) {
         Path basePath = Paths.get(searchPath).normalize();
-        Path resolvedPath = WORKING_DIR.resolve(basePath).normalize();
-        if (!resolvedPath.startsWith(WORKING_DIR)) {
+        Path resolvedPath = workingDir().resolve(basePath).normalize();
+        if (!resolvedPath.startsWith(workingDir())) {
             return ToolResult.error("Access denied: path outside working directory");
         }
         if (!Files.exists(resolvedPath)) {
@@ -87,8 +100,9 @@ public class SearchTool implements Tool {
             PathMatcher matcher = FileSystems.getDefault().getPathMatcher("glob:" + pattern);
             List<String> matches = new ArrayList<>();
 
-            try (Stream<Path> walk = Files.walk(resolvedPath)) {
-                walk.filter(Files::isRegularFile)
+            try (Stream<Path> walk = Files.walk(resolvedPath, MAX_WALK_DEPTH)) {
+                walk.filter(p -> !shouldSkipDir(p))
+                        .filter(Files::isRegularFile)
                         .filter(p -> {
                             Path relativePath = resolvedPath.relativize(p);
                             return matcher.matches(relativePath) || matcher.matches(p.getFileName());
@@ -109,8 +123,8 @@ public class SearchTool implements Tool {
 
     private ToolResult grepSearch(String regex, String searchPath, Map<String, Object> args, int maxResults) {
         Path basePath = Paths.get(searchPath).normalize();
-        Path resolvedPath = WORKING_DIR.resolve(basePath).normalize();
-        if (!resolvedPath.startsWith(WORKING_DIR)) {
+        Path resolvedPath = workingDir().resolve(basePath).normalize();
+        if (!resolvedPath.startsWith(workingDir())) {
             return ToolResult.error("Access denied: path outside working directory");
         }
         if (!Files.exists(resolvedPath)) {
@@ -133,8 +147,9 @@ public class SearchTool implements Tool {
                 : null;
 
         List<String> results = new ArrayList<>();
-        try (Stream<Path> walk = Files.walk(resolvedPath)) {
-            walk.filter(Files::isRegularFile)
+        try (Stream<Path> walk = Files.walk(resolvedPath, MAX_WALK_DEPTH)) {
+            walk.filter(p -> !shouldSkipDir(p))
+                    .filter(Files::isRegularFile)
                     .filter(p -> !isBinaryFile(p))
                     .filter(p -> fileFilter == null || fileFilter.matches(p.getFileName()))
                     .forEach(p -> {
@@ -161,6 +176,11 @@ public class SearchTool implements Tool {
         }
 
         return ToolResult.success("Found " + results.size() + " matches:\n" + String.join("\n", results));
+    }
+
+    private boolean shouldSkipDir(Path path) {
+        String name = path.getFileName().toString();
+        return SKIP_DIRS.contains(name);
     }
 
     private boolean isBinaryFile(Path path) {

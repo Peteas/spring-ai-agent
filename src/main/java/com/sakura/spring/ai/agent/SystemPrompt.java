@@ -3,7 +3,6 @@ package com.sakura.spring.ai.agent;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class SystemPrompt {
@@ -15,17 +14,17 @@ public class SystemPrompt {
     private static final long CACHE_TTL = 60000; // 1 minute
 
     public static String build(Path workingDir) {
-        // 检查缓存是否有效
         long now = System.currentTimeMillis();
-        if (cachedPrompt.get() != null && (now - lastBuildTime) < CACHE_TTL) {
+        String gitBranch = getGitBranch(workingDir);
+        if (cachedPrompt.get() != null
+                && (now - lastBuildTime) < CACHE_TTL
+                && gitBranch.equals(lastGitBranch)) {
             return cachedPrompt.get();
         }
 
-        // 重新构建 prompt
         String os = System.getProperty("os.name") + " " + System.getProperty("os.arch");
         String javaVersion = System.getProperty("java.version");
         String currentTime = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
-        String gitBranch = getGitBranch(workingDir);
 
         String prompt = """
                 You are MiMo Code Agent, an AI-powered coding assistant built on Xiaomi's MiMo large language model. You help users with software engineering tasks by reading, writing, and editing code, executing commands, searching codebases, and managing projects.
@@ -101,16 +100,21 @@ public class SystemPrompt {
     }
 
     private static String getGitBranch(Path workingDir) {
+        Process p = null;
         try {
             ProcessBuilder pb = new ProcessBuilder("git", "rev-parse", "--abbrev-ref", "HEAD");
             pb.directory(workingDir.toFile());
             pb.redirectErrorStream(true);
-            Process p = pb.start();
+            p = pb.start();
             String branch = new String(p.getInputStream().readAllBytes()).trim();
             p.waitFor();
             return branch.isEmpty() ? "N/A" : branch;
         } catch (Exception e) {
             return "N/A";
+        } finally {
+            if (p != null) {
+                p.destroy();
+            }
         }
     }
 }

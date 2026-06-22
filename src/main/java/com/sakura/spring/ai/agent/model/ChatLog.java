@@ -26,6 +26,8 @@ public class ChatLog {
     private Long latencyMs;       // 这次对话总共耗时多久，毫秒
     private String model;         // 用的哪个模型
     private String error;         // 出错了就记下来，正常的话是 null
+    private Integer userRating;   // 用户评分 1-5，nullable
+    private Double qualityScore;  // 计算的质量分，nullable
     private LocalDateTime createdAt;  // 什么时候产生的
 
     public ChatLog() {}

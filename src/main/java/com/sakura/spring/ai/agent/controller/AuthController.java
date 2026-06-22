@@ -65,6 +65,18 @@ public class AuthController {
         )));
     }
 
+    @PostMapping("/logout")
+    public ResponseEntity<?> logout(@RequestHeader(value = "Authorization", required = false) String authHeader,
+                                    @RequestBody(required = false) Map<String, String> body) {
+        String accessToken = null;
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            accessToken = authHeader.substring(7);
+        }
+        String refreshToken = body != null ? body.get("refreshToken") : null;
+        userService.logout(accessToken, refreshToken);
+        return ResponseEntity.ok(ApiResponse.success(Map.of("message", "Logged out")));
+    }
+
     public record RegisterRequest(
             @NotBlank @Size(min = 3, max = 50) @Pattern(regexp = "^[a-zA-Z0-9_]+$") String username,
             @NotBlank @Size(min = 8, max = 128) String password,

@@ -19,9 +19,9 @@ public class ChatLogService {
     private final ChatLogMapper chatLogMapper;
     private final ObjectMapper objectMapper;
 
-    public ChatLogService(ChatLogMapper chatLogMapper) {
+    public ChatLogService(ChatLogMapper chatLogMapper, ObjectMapper objectMapper) {
         this.chatLogMapper = chatLogMapper;
-        this.objectMapper = new ObjectMapper();
+        this.objectMapper = objectMapper;
     }
 
     @Async

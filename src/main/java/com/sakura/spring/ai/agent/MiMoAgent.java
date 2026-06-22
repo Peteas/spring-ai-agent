@@ -2,6 +2,7 @@ package com.sakura.spring.ai.agent;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sakura.spring.ai.agent.config.AgentProperties;
 import com.sakura.spring.ai.agent.memory.ConversationMemory;
 import com.sakura.spring.ai.agent.service.ChatLogService;
 import com.sakura.spring.ai.agent.tool.Tool;
@@ -10,59 +11,68 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.*;
 import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 import reactor.util.retry.Retry;
 
-import java.nio.file.Path;
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @Service
 public class MiMoAgent {
 
     private static final Logger log = LoggerFactory.getLogger(MiMoAgent.class);
-    private static final int MAX_TOOL_CALL_ROUNDS = 20;
 
     private final ChatModel chatModel;
     private final ToolRegistry toolRegistry;
     private final ConversationMemory memory;
     private final ChatLogService chatLogService;
     private final ObjectMapper objectMapper;
+    private final AgentProperties agentProperties;
 
     public MiMoAgent(ChatModel chatModel, ToolRegistry toolRegistry,
-                     ConversationMemory memory, ChatLogService chatLogService) {
+                     ConversationMemory memory, ChatLogService chatLogService,
+                     ObjectMapper objectMapper, AgentProperties agentProperties) {
         this.chatModel = chatModel;
         this.toolRegistry = toolRegistry;
         this.memory = memory;
         this.chatLogService = chatLogService;
-        this.objectMapper = new ObjectMapper();
+        this.objectMapper = objectMapper;
+        this.agentProperties = agentProperties;
+    }
+
+    public Flux<AgentEvent> chatStream(String sessionId, String userMessage) {
+        return chatStream(sessionId, userMessage, null);
     }
 
     /**
      * Streaming chat — returns a Flux of AgentEvents with true token-level streaming.
      */
-    public Flux<AgentEvent> chatStream(String sessionId, String userMessage) {
+    public Flux<AgentEvent> chatStream(String sessionId, String userMessage, Long userId) {
         log.info("Chat session {} - User message length: {}", sessionId, userMessage.length());
-        // 去重：避免网络重试时重复添加相同用户消息
         List<Message> existing = memory.getMessages(sessionId);
         if (existing.isEmpty() || !(existing.get(existing.size() - 1) instanceof UserMessage um)
                 || !um.getText().equals(userMessage)) {
             memory.addUserMessage(sessionId, userMessage);
         }
-        String systemPrompt = SystemPrompt.build(Path.of(System.getProperty("user.dir")));
+        String systemPrompt = SystemPrompt.build(agentProperties.getWorkingDirPath());
 
-        List<Message> messages = new ArrayList<>();
+        List<Message> messages = Collections.synchronizedList(new ArrayList<>());
         messages.add(new SystemMessage(systemPrompt));
         messages.addAll(memory.getMessages(sessionId));
         List<ToolCallback> toolCallbacks = toolRegistry.getToolCallbacks();
 
+        final int maxRounds = agentProperties.getMaxToolCallRounds();
         final AtomicInteger toolCallRound = new AtomicInteger(0);
+        final AtomicInteger totalToolCallCount = new AtomicInteger(0);
+        final List<String> allToolsUsed = new CopyOnWriteArrayList<>();
         final AtomicInteger totalPromptTokens = new AtomicInteger(0);
         final AtomicInteger totalCompletionTokens = new AtomicInteger(0);
         final AtomicInteger totalTokens = new AtomicInteger(0);
@@ -72,10 +82,9 @@ public class MiMoAgent {
             List<AssistantMessage.ToolCall> accumulatedToolCalls = new ArrayList<>();
             StringBuilder contentBuilder = new StringBuilder();
 
-            // 检查工具调用轮次限制
-            if (toolCallRound.get() >= MAX_TOOL_CALL_ROUNDS) {
-                log.warn("Session {} reached maximum tool call rounds ({})", sessionId, MAX_TOOL_CALL_ROUNDS);
-                return Flux.just(AgentEvent.error("Maximum tool call rounds reached (" + MAX_TOOL_CALL_ROUNDS + "). Stopping to prevent infinite loop."));
+            if (toolCallRound.get() >= maxRounds) {
+                log.warn("Session {} reached maximum tool call rounds ({})", sessionId, maxRounds);
+                return Flux.just(AgentEvent.error("Maximum tool call rounds reached (" + maxRounds + "). Stopping to prevent infinite loop."));
             }
 
             ToolCallingChatOptions options = ToolCallingChatOptions.builder()
@@ -98,7 +107,6 @@ public class MiMoAgent {
                             })
                             .onRetryExhaustedThrow((spec, signal) -> signal.failure()))
                     .concatMap(response -> {
-                        // 提取 token usage
                         if (response.getMetadata() != null && response.getMetadata().getUsage() != null) {
                             var usage = response.getMetadata().getUsage();
                             if (usage.getPromptTokens() != null) totalPromptTokens.set(usage.getPromptTokens());
@@ -129,7 +137,7 @@ public class MiMoAgent {
                     .concatWith(Flux.defer(() -> {
                         if (!accumulatedToolCalls.isEmpty()) {
                             toolCallRound.incrementAndGet();
-                            log.debug("Session {} - Tool call round {}/{}", sessionId, toolCallRound.get(), MAX_TOOL_CALL_ROUNDS);
+                            log.debug("Session {} - Tool call round {}/{}", sessionId, toolCallRound.get(), maxRounds);
 
                             AssistantMessage toolCallMsg = AssistantMessage.builder()
                                     .content(contentBuilder.toString())
@@ -138,22 +146,19 @@ public class MiMoAgent {
                             messages.add(toolCallMsg);
                             memory.addMessage(sessionId, toolCallMsg);
 
-                            List<AgentEvent> toolEvents = new ArrayList<>();
-                            for (var tc : accumulatedToolCalls) {
-                                log.debug("Session {} - Executing tool: {}", sessionId, tc.name());
-                                toolEvents.add(AgentEvent.toolCall(tc.name(), tc.arguments()));
-                                Tool.ToolResult result = toolRegistry.execute(tc.name(),
-                                        parseArguments(tc.arguments()));
-                                toolEvents.add(AgentEvent.toolResult(tc.name(),
-                                        result.output(), result.isError()));
-                                ToolResponseMessage toolRespMsg = ToolResponseMessage.builder()
-                                        .responses(List.of(new ToolResponseMessage.ToolResponse(
-                                                tc.id(), tc.name(), result.output())))
-                                        .build();
-                                messages.add(toolRespMsg);
-                                memory.addMessage(sessionId, toolRespMsg);
-                            }
-                            return Flux.fromIterable(toolEvents);
+                            return Flux.fromIterable(accumulatedToolCalls)
+                                    .concatMap(tc -> Mono.fromCallable(() -> executeTool(sessionId, tc))
+                                            .subscribeOn(Schedulers.boundedElastic())
+                                            .flatMapMany(result -> {
+                                                messages.add(result.toolResponseMessage());
+                                                memory.addMessage(sessionId, result.toolResponseMessage());
+                                                allToolsUsed.add(tc.name());
+                                                totalToolCallCount.incrementAndGet();
+                                                return Flux.just(
+                                                        AgentEvent.toolCall(tc.name(), tc.arguments()),
+                                                        AgentEvent.toolResult(tc.name(), result.output(), result.isError())
+                                                );
+                                            }));
                         } else {
                             String answer = contentBuilder.toString();
                             if (!answer.isEmpty()) {
@@ -162,15 +167,11 @@ public class MiMoAgent {
                                         sessionId, answer.length(),
                                         totalPromptTokens.get(), totalCompletionTokens.get(), totalTokens.get());
                             }
-                            // 异步记录对话日志
                             long latency = System.currentTimeMillis() - startTime;
-                            List<String> toolNames = toolCallRound.get() > 0
-                                    ? accumulatedToolCalls.stream().map(AssistantMessage.ToolCall::name).toList()
-                                    : List.of();
-                            chatLogService.saveChatLog(null, sessionId, userMessage, answer,
+                            chatLogService.saveChatLog(userId, sessionId, userMessage, answer,
                                     totalPromptTokens.get(), totalCompletionTokens.get(), totalTokens.get(),
-                                    toolNames, accumulatedToolCalls.size(), toolCallRound.get(),
-                                    latency, "mimo-v2.5-pro", null);
+                                    List.copyOf(allToolsUsed), totalToolCallCount.get(), toolCallRound.get(),
+                                    latency, agentProperties.getModel(), null);
 
                             return Flux.just(AgentEvent.doneWithUsage(
                                     totalPromptTokens.get(), totalCompletionTokens.get(), totalTokens.get()));
@@ -183,21 +184,45 @@ public class MiMoAgent {
         .onErrorResume(e -> {
             log.error("Session {} - Agent error: {}", sessionId, e.getMessage(), e);
             long latency = System.currentTimeMillis() - startTime;
-            chatLogService.saveChatLog(null, sessionId, userMessage, null,
+            chatLogService.saveChatLog(userId, sessionId, userMessage, null,
                     totalPromptTokens.get(), totalCompletionTokens.get(), totalTokens.get(),
-                    List.of(), 0, toolCallRound.get(), latency, "mimo-v2.5-pro", e.getMessage());
+                    List.copyOf(allToolsUsed), totalToolCallCount.get(), toolCallRound.get(),
+                    latency, agentProperties.getModel(), e.getMessage());
             return Flux.just(AgentEvent.error("Agent error: " + e.getMessage()));
         });
     }
 
-    /**
-     * Synchronous chat — collects the full streaming response.
-     */
+    private ToolExecutionResult executeTool(String sessionId, AssistantMessage.ToolCall tc) {
+        Map<String, Object> parsedArgs = parseArguments(tc.arguments());
+        Tool.ToolResult result;
+        if (parsedArgs == null) {
+            result = Tool.ToolResult.error("Invalid JSON arguments for tool: " + tc.arguments());
+        } else {
+            if ("todo".equals(tc.name())) {
+                parsedArgs = new HashMap<>(parsedArgs);
+                parsedArgs.putIfAbsent("sessionId", sessionId);
+            }
+            log.debug("Session {} - Executing tool: {}", sessionId, tc.name());
+            result = toolRegistry.execute(tc.name(), parsedArgs);
+        }
+        ToolResponseMessage toolRespMsg = ToolResponseMessage.builder()
+                .responses(List.of(new ToolResponseMessage.ToolResponse(
+                        tc.id(), tc.name(), result.output())))
+                .build();
+        return new ToolExecutionResult(toolRespMsg, result.output(), result.isError());
+    }
+
+    private record ToolExecutionResult(ToolResponseMessage toolResponseMessage, String output, boolean isError) {}
+
     public AgentResponse chat(String sessionId, String userMessage, AgentCallback callback) {
+        return chat(sessionId, userMessage, null, callback);
+    }
+
+    public AgentResponse chat(String sessionId, String userMessage, Long userId, AgentCallback callback) {
         StringBuilder answerBuilder = new StringBuilder();
         boolean[] success = {false};
 
-        chatStream(sessionId, userMessage)
+        chatStream(sessionId, userMessage, userId)
                 .doOnNext(event -> {
                     switch (event.type()) {
                         case ANSWER_CHUNK -> {
@@ -233,7 +258,7 @@ public class MiMoAgent {
             return objectMapper.readValue(json, new TypeReference<>() {});
         } catch (Exception e) {
             log.warn("Failed to parse tool arguments: {}", e.getMessage());
-            return Map.of();
+            return null;
         }
     }
 
@@ -245,7 +270,6 @@ public class MiMoAgent {
         return memory.listSessions();
     }
 
-    // Callback interface for synchronous usage (CLI)
     public interface AgentCallback {
         default void onToolCall(String toolName, String arguments) {}
         default void onToolResult(String toolName, String output, boolean isError) {}

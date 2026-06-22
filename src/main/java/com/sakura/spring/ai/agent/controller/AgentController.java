@@ -1,7 +1,6 @@
 package com.sakura.spring.ai.agent.controller;
 
 import com.sakura.spring.ai.agent.MiMoAgent;
-import com.sakura.spring.ai.agent.MiMoAgent.AgentEvent;
 import com.sakura.spring.ai.agent.memory.ConversationMemory;
 import com.sakura.spring.ai.agent.security.JwtUserDetails;
 import com.sakura.spring.ai.agent.service.UserService;
@@ -38,11 +37,9 @@ public class AgentController {
         this.userService = userService;
     }
 
-    // SSE 流式聊天，合并心跳保活
     @PostMapping(value = "/chat", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public ResponseEntity<?> chat(@RequestBody ChatRequest request,
                                   @AuthenticationPrincipal JwtUserDetails userDetails) {
-        // 校验 message 长度
         if (request.message() == null || request.message().isBlank()) {
             return ResponseEntity.badRequest().body(ApiResponse.error("Message is required"));
         }
@@ -50,40 +47,50 @@ public class AgentController {
             return ResponseEntity.badRequest().body(ApiResponse.error("Message too long. Maximum length: " + MAX_MESSAGE_LENGTH));
         }
 
-        // 生成或校验 sessionId
-        String sessionId = request.sessionId();
-        if (sessionId == null || sessionId.isBlank()) {
-            sessionId = "web-" + UUID.randomUUID();
-        } else if (!SESSION_ID_PATTERN.matcher(sessionId).matches()) {
+        boolean sessionIdProvided = request.sessionId() != null && !request.sessionId().isBlank();
+        String sessionId = sessionIdProvided ? request.sessionId() : "web-" + UUID.randomUUID();
+
+        if (!SESSION_ID_PATTERN.matcher(sessionId).matches()) {
             return ResponseEntity.badRequest().body(ApiResponse.error("Invalid sessionId format. Use alphanumeric characters and hyphens, max 64 chars"));
         }
 
-        // regenerate: 删除最后一轮对话
-        if (Boolean.TRUE.equals(request.regenerate())) {
-            memory.removeLastMessages(sessionId, 2);
+        if (sessionIdProvided) {
+            ResponseEntity<?> accessDenied = checkSessionAccess(sessionId, userDetails);
+            if (accessDenied != null) {
+                return accessDenied;
+            }
         }
 
-        // 关联 session 到用户
-        if (userDetails != null) {
-            userService.associateSession(userDetails.getUserId(), sessionId);
+        if (Boolean.TRUE.equals(request.regenerate())) {
+            memory.removeLastTurn(sessionId);
+        }
+
+        Long userId = userDetails != null ? userDetails.getUserId() : null;
+        if (userId != null) {
+            userService.associateSession(userId, sessionId);
         }
 
         final String finalSessionId = sessionId;
 
-        // 创建消息流
-        Flux<ServerSentEvent<Map<String, Object>>> messageStream = agent.chatStream(finalSessionId, request.message())
-                .map(event -> ServerSentEvent.<Map<String, Object>>builder()
-                        .event(event.type().name().toLowerCase())
-                        .data(Map.of(
-                                "type", event.type().name(),
-                                "toolName", event.toolName() != null ? event.toolName() : "",
-                                "content", event.content() != null ? event.content() : "",
-                                "isError", event.isError()
-                        ))
-                        .build())
-                .cache(); // 缓存以便 heartbeat 能检测到完成
+        Flux<ServerSentEvent<Map<String, Object>>> messageStream = agent.chatStream(finalSessionId, request.message(), userId)
+                .map(event -> {
+                    Map<String, Object> data = new LinkedHashMap<>();
+                    data.put("type", event.type().name());
+                    data.put("toolName", event.toolName() != null ? event.toolName() : "");
+                    data.put("content", event.content() != null ? event.content() : "");
+                    data.put("isError", event.isError());
+                    if (event.type() == MiMoAgent.AgentEvent.EventType.DONE) {
+                        data.put("promptTokens", event.promptTokens());
+                        data.put("completionTokens", event.completionTokens());
+                        data.put("totalTokens", event.totalTokens());
+                    }
+                    return ServerSentEvent.<Map<String, Object>>builder()
+                            .event(event.type().name().toLowerCase())
+                            .data(data)
+                            .build();
+                })
+                .cache();
 
-        // 心跳流：在消息流完成/错误时自动终止
         Mono<Void> streamTerminated = messageStream.then(Mono.<Void>empty()).onErrorResume(e -> Mono.empty());
         Flux<ServerSentEvent<Map<String, Object>>> heartbeat = Flux.interval(Duration.ofSeconds(30))
                 .takeUntilOther(streamTerminated)
@@ -91,10 +98,38 @@ public class AgentController {
                         .comment("heartbeat")
                         .build());
 
-        // 合并心跳和消息流
+        Flux<ServerSentEvent<Map<String, Object>>> merged = Flux.merge(heartbeat, messageStream)
+                .onErrorResume(e -> {
+                    Map<String, Object> errorData = Map.of(
+                            "type", "ERROR",
+                            "toolName", "",
+                            "content", "Stream error: " + e.getMessage(),
+                            "isError", true
+                    );
+                    return Flux.just(ServerSentEvent.<Map<String, Object>>builder()
+                            .event("error")
+                            .data(errorData)
+                            .build());
+                });
+
         return ResponseEntity.ok()
                 .contentType(MediaType.TEXT_EVENT_STREAM)
-                .body(Flux.merge(heartbeat, messageStream));
+                .body(merged);
+    }
+
+    private ResponseEntity<?> checkSessionAccess(String sessionId, JwtUserDetails userDetails) {
+        if (!memory.hasSession(sessionId) && !userService.isSessionOwnedByAnyone(sessionId)) {
+            return null;
+        }
+        if (userDetails != null) {
+            if (userService.isSessionOwnedByAnyone(sessionId)
+                    && !userService.isSessionOwner(userDetails.getUserId(), sessionId)) {
+                return ResponseEntity.status(403).body(ApiResponse.error(403, "Access denied"));
+            }
+        } else if (userService.isSessionOwnedByAnyone(sessionId)) {
+            return ResponseEntity.status(403).body(ApiResponse.error(403, "Authentication required for this session"));
+        }
+        return null;
     }
 
     @GetMapping("/sessions")
@@ -111,6 +146,10 @@ public class AgentController {
         if (!isValidSessionId(sessionId)) {
             return ResponseEntity.badRequest().body(ApiResponse.error("Invalid sessionId format"));
         }
+        if (userDetails != null && userService.isSessionOwnedByAnyone(sessionId)
+                && !userService.isSessionOwner(userDetails.getUserId(), sessionId)) {
+            return ResponseEntity.status(403).body(ApiResponse.error(403, "Access denied"));
+        }
         agent.clearSession(sessionId);
         if (userDetails != null) {
             userService.removeSession(userDetails.getUserId(), sessionId);
@@ -124,8 +163,8 @@ public class AgentController {
         if (!isValidSessionId(sessionId)) {
             return ResponseEntity.badRequest().body(ApiResponse.error("Invalid sessionId format"));
         }
-        // 验证 session 所有权
-        if (userDetails != null && !userService.isSessionOwner(userDetails.getUserId(), sessionId)) {
+        if (userDetails != null && userService.isSessionOwnedByAnyone(sessionId)
+                && !userService.isSessionOwner(userDetails.getUserId(), sessionId)) {
             return ResponseEntity.status(403).body(ApiResponse.error(403, "Access denied"));
         }
 

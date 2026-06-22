@@ -43,9 +43,12 @@ public class MiMoToolCallback implements ToolCallback {
         try {
             Map<String, Object> args = objectMapper.readValue(toolInput, Map.class);
             Tool.ToolResult result = tool.execute(args);
+            if (result.isError()) {
+                return "[ERROR] " + result.output();
+            }
             return result.output();
         } catch (Exception e) {
-            return "Error: " + e.getMessage();
+            return "[ERROR] " + e.getMessage();
         }
     }
 

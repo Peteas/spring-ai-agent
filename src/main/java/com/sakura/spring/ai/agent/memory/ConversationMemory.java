@@ -6,11 +6,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.*;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
-
-import org.springframework.beans.factory.annotation.Autowired;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -25,22 +24,23 @@ public class ConversationMemory {
     private static final Logger log = LoggerFactory.getLogger(ConversationMemory.class);
     private static final String KEY_PREFIX = "mimo:session:";
     private static final String SESSIONS_KEY = "mimo:sessions";
-    private static final long REDIS_RETRY_INTERVAL = 60000; // 1 minute
-    private static final long SESSION_TTL_DAYS = 7; // Session TTL: 7 days
+    private static final long REDIS_RETRY_INTERVAL = 60000;
+    private static final long SESSION_TTL_DAYS = 7;
+    private static final int MAX_IN_MEMORY_SESSIONS = 1000;
 
     private StringRedisTemplate redis;
     private final ObjectMapper objectMapper;
 
     @Value("${mimo.agent.max-context-messages:50}")
-    private int maxMessages;
+    private int maxMessages = 50;
 
-    // Fallback in-memory store when Redis is unavailable
     private final Map<String, List<Message>> inMemoryFallback = new ConcurrentHashMap<>();
+    private final Map<String, List<Message>> sessionCache = new ConcurrentHashMap<>();
     private final AtomicBoolean redisAvailable = new AtomicBoolean(false);
     private volatile long lastRedisCheckTime = 0;
 
-    public ConversationMemory() {
-        this.objectMapper = new ObjectMapper();
+    public ConversationMemory(ObjectMapper objectMapper) {
+        this.objectMapper = objectMapper;
     }
 
     @Autowired(required = false)
@@ -67,14 +67,30 @@ public class ConversationMemory {
 
     private boolean isRedisAvailable() {
         if (redis == null) return false;
-        // 尝试重连
         if (!redisAvailable.get() && System.currentTimeMillis() - lastRedisCheckTime > REDIS_RETRY_INTERVAL) {
-            checkRedisConnection();
+            synchronized (this) {
+                if (System.currentTimeMillis() - lastRedisCheckTime > REDIS_RETRY_INTERVAL) {
+                    checkRedisConnection();
+                }
+            }
         }
         return redisAvailable.get();
     }
 
     public List<Message> getMessages(String sessionId) {
+        List<Message> cached = sessionCache.get(sessionId);
+        if (cached != null) {
+            return new ArrayList<>(cached);
+        }
+
+        List<Message> loaded = loadMessagesFromStore(sessionId);
+        if (!loaded.isEmpty()) {
+            sessionCache.put(sessionId, new CopyOnWriteArrayList<>(loaded));
+        }
+        return new ArrayList<>(loaded);
+    }
+
+    private List<Message> loadMessagesFromStore(String sessionId) {
         if (!isRedisAvailable()) {
             return new ArrayList<>(inMemoryFallback.getOrDefault(sessionId, new CopyOnWriteArrayList<>()));
         }
@@ -94,8 +110,18 @@ public class ConversationMemory {
 
     public void addMessage(String sessionId, Message message) {
         if (!isRedisAvailable()) {
-            inMemoryFallback.computeIfAbsent(sessionId, k -> new CopyOnWriteArrayList<>()).add(message);
-            log.debug("Added message to in-memory store for session {}", sessionId);
+            if (!inMemoryFallback.containsKey(sessionId) && inMemoryFallback.size() >= MAX_IN_MEMORY_SESSIONS) {
+                String oldest = inMemoryFallback.keySet().iterator().next();
+                inMemoryFallback.remove(oldest);
+                sessionCache.remove(oldest);
+                log.warn("In-memory session limit reached, evicted session {}", oldest);
+            }
+            List<Message> messages = inMemoryFallback.computeIfAbsent(sessionId, k -> new CopyOnWriteArrayList<>());
+            messages.add(message);
+            while (messages.size() > maxMessages) {
+                messages.remove(0);
+            }
+            sessionCache.put(sessionId, messages);
             return;
         }
         try {
@@ -106,20 +132,25 @@ public class ConversationMemory {
             }
             String key = KEY_PREFIX + sessionId;
             redis.opsForList().rightPush(key, json);
-            // Track session
             redis.opsForSet().add(SESSIONS_KEY, sessionId);
-            // Set TTL on session key (refresh on each add)
             redis.expire(key, SESSION_TTL_DAYS, TimeUnit.DAYS);
-            // Trim if needed
             Long size = redis.opsForList().size(key);
             if (size != null && size > maxMessages) {
                 redis.opsForList().trim(key, size - maxMessages, -1);
             }
+            refreshCache(sessionId);
         } catch (Exception e) {
             log.error("Failed to add message to Redis for session {}: {}", sessionId, e.getMessage());
             redisAvailable.set(false);
-            inMemoryFallback.computeIfAbsent(sessionId, k -> new CopyOnWriteArrayList<>()).add(message);
+            List<Message> messages = inMemoryFallback.computeIfAbsent(sessionId, k -> new CopyOnWriteArrayList<>());
+            messages.add(message);
+            sessionCache.put(sessionId, messages);
         }
+    }
+
+    private void refreshCache(String sessionId) {
+        List<Message> loaded = loadMessagesFromStore(sessionId);
+        sessionCache.put(sessionId, new CopyOnWriteArrayList<>(loaded));
     }
 
     public void addUserMessage(String sessionId, String content) {
@@ -137,12 +168,39 @@ public class ConversationMemory {
                 .build());
     }
 
+    /**
+     * Remove the last complete conversation turn (user message and all follow-up assistant/tool messages).
+     */
+    public void removeLastTurn(String sessionId) {
+        List<Message> messages = getMessages(sessionId);
+        if (messages.isEmpty()) {
+            return;
+        }
+        int lastUserIdx = -1;
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            if (messages.get(i) instanceof UserMessage) {
+                lastUserIdx = i;
+                break;
+            }
+        }
+        if (lastUserIdx < 0) {
+            return;
+        }
+        removeLastMessages(sessionId, messages.size() - lastUserIdx);
+    }
+
     public void removeLastMessages(String sessionId, int count) {
+        if (count <= 0) {
+            return;
+        }
         if (!isRedisAvailable()) {
-            List<Message> messages = inMemoryFallback.get(sessionId);
-            if (messages != null && messages.size() >= count) {
-                for (int i = 0; i < count; i++) {
-                    messages.remove(messages.size() - 1);
+            synchronized (inMemoryFallback) {
+                List<Message> messages = inMemoryFallback.get(sessionId);
+                if (messages != null) {
+                    for (int i = 0; i < count && !messages.isEmpty(); i++) {
+                        messages.remove(messages.size() - 1);
+                    }
+                    sessionCache.put(sessionId, messages);
                 }
             }
             return;
@@ -152,18 +210,23 @@ public class ConversationMemory {
             if (size != null && size >= count) {
                 redis.opsForList().trim(KEY_PREFIX + sessionId, 0, size - count - 1);
             }
+            refreshCache(sessionId);
         } catch (Exception e) {
             log.error("Failed to remove last {} messages from session {}: {}", count, sessionId, e.getMessage());
-            List<Message> messages = inMemoryFallback.get(sessionId);
-            if (messages != null && messages.size() >= count) {
-                for (int i = 0; i < count; i++) {
-                    messages.remove(messages.size() - 1);
+            synchronized (inMemoryFallback) {
+                List<Message> messages = inMemoryFallback.get(sessionId);
+                if (messages != null) {
+                    for (int i = 0; i < count && !messages.isEmpty(); i++) {
+                        messages.remove(messages.size() - 1);
+                    }
+                    sessionCache.put(sessionId, messages);
                 }
             }
         }
     }
 
     public void clearSession(String sessionId) {
+        sessionCache.remove(sessionId);
         if (!isRedisAvailable()) {
             inMemoryFallback.remove(sessionId);
             return;
@@ -171,7 +234,6 @@ public class ConversationMemory {
         try {
             redis.delete(KEY_PREFIX + sessionId);
             redis.opsForSet().remove(SESSIONS_KEY, sessionId);
-            log.debug("Cleared session {} from Redis", sessionId);
         } catch (Exception e) {
             log.error("Failed to clear session {} from Redis: {}", sessionId, e.getMessage());
             inMemoryFallback.remove(sessionId);
@@ -193,7 +255,12 @@ public class ConversationMemory {
     }
 
     public boolean hasSession(String sessionId) {
-        if (!isRedisAvailable()) return inMemoryFallback.containsKey(sessionId);
+        if (sessionCache.containsKey(sessionId)) {
+            return !sessionCache.get(sessionId).isEmpty();
+        }
+        if (!isRedisAvailable()) {
+            return inMemoryFallback.containsKey(sessionId);
+        }
         try {
             Boolean has = redis.hasKey(KEY_PREFIX + sessionId);
             return Boolean.TRUE.equals(has);
@@ -202,8 +269,6 @@ public class ConversationMemory {
             return inMemoryFallback.containsKey(sessionId);
         }
     }
-
-    // --- Serialization helpers ---
 
     private String serializeMessage(Message message) {
         try {
@@ -231,7 +296,6 @@ public class ConversationMemory {
             return objectMapper.writeValueAsString(data);
         } catch (JsonProcessingException e) {
             log.error("Failed to serialize message, skipping: {}", e.getMessage());
-            // 使用 ObjectMapper 序列化最小数据，失败则返回 null
             try {
                 Map<String, Object> fallback = new LinkedHashMap<>();
                 fallback.put("type", message.getMessageType().name());

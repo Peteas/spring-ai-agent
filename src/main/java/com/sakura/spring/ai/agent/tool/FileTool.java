@@ -1,7 +1,9 @@
 package com.sakura.spring.ai.agent.tool;
 
+import com.sakura.spring.ai.agent.config.AgentProperties;
 import org.springframework.stereotype.Component;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.nio.file.*;
 import java.util.*;
@@ -11,7 +13,15 @@ import java.util.stream.Stream;
 @Component
 public class FileTool implements Tool {
 
-    private static final Path WORKING_DIR = Paths.get(System.getProperty("user.dir")).toAbsolutePath().normalize();
+    private final AgentProperties agentProperties;
+
+    public FileTool(AgentProperties agentProperties) {
+        this.agentProperties = agentProperties;
+    }
+
+    private Path workingDir() {
+        return agentProperties.getWorkingDirPath();
+    }
 
     @Override
     public String name() {
@@ -70,8 +80,8 @@ public class FileTool implements Tool {
         Path filePath = Paths.get(path).normalize();
 
         // 安全校验：确保路径在工作目录内，防止路径穿越
-        Path resolvedPath = WORKING_DIR.resolve(filePath).normalize();
-        if (!resolvedPath.startsWith(WORKING_DIR)) {
+        Path resolvedPath = workingDir().resolve(filePath).normalize();
+        if (!resolvedPath.startsWith(workingDir())) {
             return ToolResult.error("Access denied: path outside working directory");
         }
 
@@ -84,6 +94,9 @@ public class FileTool implements Tool {
         };
     }
 
+    private static final long MAX_FILE_SIZE = 1024 * 1024; // 1MB
+    private static final int MAX_WRITE_SIZE = 1024 * 1024; // 1MB
+
     private ToolResult readFile(Path path, Map<String, Object> args) {
         if (!Files.exists(path)) {
             return ToolResult.error("File not found: " + path);
@@ -93,16 +106,27 @@ public class FileTool implements Tool {
         }
 
         try {
-            List<String> lines = Files.readAllLines(path);
-            int offset = args.containsKey("offset") ? ((Number) args.get("offset")).intValue() : 0;
-            int limit = args.containsKey("limit") ? ((Number) args.get("limit")).intValue() : lines.size();
+            long fileSize = Files.size(path);
+            if (fileSize > MAX_FILE_SIZE) {
+                return ToolResult.error("File too large (" + (fileSize / 1024) + "KB). Max supported: " + (MAX_FILE_SIZE / 1024) + "KB. Use offset/limit to read a range.");
+            }
 
-            offset = Math.max(0, Math.min(offset, lines.size()));
-            int end = Math.min(offset + limit, lines.size());
+            int offset = args.containsKey("offset") ? ((Number) args.get("offset")).intValue() : 0;
+            int limit = args.containsKey("limit") ? ((Number) args.get("limit")).intValue() : Integer.MAX_VALUE;
 
             StringBuilder sb = new StringBuilder();
-            for (int i = offset; i < end; i++) {
-                sb.append(String.format("%d\t%s%n", i + 1, lines.get(i)));
+            int lineNum = 0;
+            int linesRead = 0;
+            try (BufferedReader reader = Files.newBufferedReader(path)) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (lineNum >= offset && linesRead < limit) {
+                        sb.append(String.format("%d\t%s%n", lineNum + 1, line));
+                        linesRead++;
+                    }
+                    lineNum++;
+                    if (linesRead >= limit) break;
+                }
             }
 
             if (sb.isEmpty()) {
@@ -118,6 +142,9 @@ public class FileTool implements Tool {
         String content = (String) args.get("content");
         if (content == null) {
             return ToolResult.error("Content is required for write_file");
+        }
+        if (content.length() > MAX_WRITE_SIZE) {
+            return ToolResult.error("Content too large (" + (content.length() / 1024) + "KB). Max supported: " + (MAX_WRITE_SIZE / 1024) + "KB.");
         }
 
         try {
