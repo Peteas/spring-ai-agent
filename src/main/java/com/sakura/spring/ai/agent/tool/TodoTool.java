@@ -5,13 +5,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @Component
 public class TodoTool implements Tool {
 
-    private final List<TodoItem> todos = new CopyOnWriteArrayList<>();
+    private final Map<String, List<TodoItem>> todosBySession = new ConcurrentHashMap<>();
     private final AtomicInteger idCounter = new AtomicInteger(0);
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -47,6 +48,10 @@ public class TodoTool implements Tool {
                                 "type", "string",
                                 "description", "Task status (for update): pending, in_progress, completed",
                                 "enum", List.of("pending", "in_progress", "completed")
+                        ),
+                        "sessionId", Map.of(
+                                "type", "string",
+                                "description", "Session ID for task isolation (default: global)"
                         )
                 ),
                 "required", List.of("action")
@@ -56,40 +61,46 @@ public class TodoTool implements Tool {
     @Override
     public ToolResult execute(Map<String, Object> args) {
         String action = (String) args.get("action");
+        String sessionId = args.containsKey("sessionId") ? (String) args.get("sessionId") : "global";
 
         return switch (action) {
-            case "create" -> createTodo(args);
-            case "update" -> updateTodo(args);
-            case "list" -> listTodos();
-            case "delete" -> deleteTodo(args);
+            case "create" -> createTodo(args, sessionId);
+            case "update" -> updateTodo(args, sessionId);
+            case "list" -> listTodos(sessionId);
+            case "delete" -> deleteTodo(args, sessionId);
             default -> ToolResult.error("Unknown action: " + action);
         };
     }
 
-    private ToolResult createTodo(Map<String, Object> args) {
+    private List<TodoItem> getTodos(String sessionId) {
+        return todosBySession.computeIfAbsent(sessionId, k -> new CopyOnWriteArrayList<>());
+    }
+
+    private ToolResult createTodo(Map<String, Object> args, String sessionId) {
         String content = (String) args.get("content");
         if (content == null || content.isBlank()) {
             return ToolResult.error("Task content is required");
         }
 
         int id = idCounter.incrementAndGet();
-        TodoItem item = new TodoItem(id, content, "pending", "activeForm");
-        todos.add(item);
+        TodoItem item = new TodoItem(id, content, "pending");
+        getTodos(sessionId).add(item);
         return ToolResult.success("Task created: #" + id + " - " + content);
     }
 
-    private ToolResult updateTodo(Map<String, Object> args) {
+    private ToolResult updateTodo(Map<String, Object> args, String sessionId) {
         if (!args.containsKey("id")) {
             return ToolResult.error("Task ID is required");
         }
         int id = ((Number) args.get("id")).intValue();
         String status = (String) args.get("status");
 
+        List<TodoItem> todos = getTodos(sessionId);
         for (TodoItem todo : todos) {
             if (todo.id() == id) {
                 if (status != null) {
                     int idx = todos.indexOf(todo);
-                    todos.set(idx, new TodoItem(todo.id(), todo.content(), status, todo.activeForm()));
+                    todos.set(idx, new TodoItem(todo.id(), todo.content(), status));
                 }
                 return ToolResult.success("Task #" + id + " updated to status: " + (status != null ? status : todo.status()));
             }
@@ -97,7 +108,8 @@ public class TodoTool implements Tool {
         return ToolResult.error("Task #" + id + " not found");
     }
 
-    private ToolResult listTodos() {
+    private ToolResult listTodos(String sessionId) {
+        List<TodoItem> todos = getTodos(sessionId);
         if (todos.isEmpty()) {
             return ToolResult.success("No tasks found.");
         }
@@ -114,18 +126,18 @@ public class TodoTool implements Tool {
         return ToolResult.success(sb.toString());
     }
 
-    private ToolResult deleteTodo(Map<String, Object> args) {
+    private ToolResult deleteTodo(Map<String, Object> args, String sessionId) {
         if (!args.containsKey("id")) {
             return ToolResult.error("Task ID is required");
         }
         int id = ((Number) args.get("id")).intValue();
 
-        boolean removed = todos.removeIf(t -> t.id() == id);
+        boolean removed = getTodos(sessionId).removeIf(t -> t.id() == id);
         if (removed) {
             return ToolResult.success("Task #" + id + " deleted");
         }
         return ToolResult.error("Task #" + id + " not found");
     }
 
-    public record TodoItem(int id, String content, String status, String activeForm) {}
+    public record TodoItem(int id, String content, String status) {}
 }

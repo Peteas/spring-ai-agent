@@ -56,6 +56,8 @@ mimo:
     command-timeout: 120
     max-context-messages: 50
     safety-mode: strict
+    max-tool-call-rounds: 20
+    model: mimo-v2.5-pro
   # JWT 配置
   jwt:
     secret: ${JWT_SECRET:a8Kj3mN9pQ2rS7tU1vW5xY0zB4cD6eF8gH0iJ2kL4mN6oP8qR0sT2uV4wX6yZ}

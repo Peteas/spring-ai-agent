@@ -10,9 +10,11 @@ import com.sakura.spring.ai.agent.model.ChatLog;
 import com.sakura.spring.ai.agent.model.EvaluationDailyMetric;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -27,11 +29,14 @@ public class EvaluationService {
     private final ChatLogMapper chatLogMapper;
     private final EvaluationDailyMetricMapper dailyMetricMapper;
     private final ObjectMapper objectMapper;
+    private final EvaluationService self;
 
-    public EvaluationService(ChatLogMapper chatLogMapper, EvaluationDailyMetricMapper dailyMetricMapper) {
+    public EvaluationService(ChatLogMapper chatLogMapper, EvaluationDailyMetricMapper dailyMetricMapper,
+                             ObjectMapper objectMapper, @Lazy EvaluationService self) {
         this.chatLogMapper = chatLogMapper;
         this.dailyMetricMapper = dailyMetricMapper;
-        this.objectMapper = new ObjectMapper();
+        this.objectMapper = objectMapper;
+        this.self = self;
     }
 
     // ==================== DTO ====================
@@ -122,7 +127,7 @@ public class EvaluationService {
         // Global snapshot
         List<ChatLog> allLogs = queryLogsByCreatedAt(dayStart, dayEnd);
         if (!allLogs.isEmpty()) {
-            saveSnapshot(date, "global", null, allLogs);
+            self.saveSnapshot(date, "global", null, allLogs);
         }
 
         // Per-user snapshots
@@ -130,14 +135,14 @@ public class EvaluationService {
                     .filter(l -> l.getUserId() != null)
                     .collect(Collectors.groupingBy(ChatLog::getUserId));
         for (Map.Entry<Long, List<ChatLog>> entry : byUser.entrySet()) {
-            saveSnapshot(date, "user", String.valueOf(entry.getKey()), entry.getValue());
+            self.saveSnapshot(date, "user", String.valueOf(entry.getKey()), entry.getValue());
         }
 
         // Per-session snapshots
         Map<String, List<ChatLog>> bySession = allLogs.stream()
                 .collect(Collectors.groupingBy(ChatLog::getSessionId));
         for (Map.Entry<String, List<ChatLog>> entry : bySession.entrySet()) {
-            saveSnapshot(date, "session", entry.getKey(), entry.getValue());
+            self.saveSnapshot(date, "session", entry.getKey(), entry.getValue());
         }
 
         log.info("Daily snapshot for {} completed: {} total logs, {} users, {} sessions",
@@ -166,9 +171,12 @@ public class EvaluationService {
         return chatLogMapper.selectList(wrapper);
     }
 
+    private static final int MAX_LOGS_PER_QUERY = 10000;
+
     private List<ChatLog> queryLogsByCreatedAt(LocalDateTime from, LocalDateTime to) {
         LambdaQueryWrapper<ChatLog> wrapper = new LambdaQueryWrapper<>();
         wrapper.between(ChatLog::getCreatedAt, from, to);
+        wrapper.last("LIMIT " + MAX_LOGS_PER_QUERY);
         return chatLogMapper.selectList(wrapper);
     }
 
@@ -247,7 +255,8 @@ public class EvaluationService {
                 latencyStats, tokenStats, toolStats, qualityStats, ratingStats);
     }
 
-    private void saveSnapshot(LocalDate date, String scopeType, String scopeId, List<ChatLog> logs) {
+    @Transactional
+    protected void saveSnapshot(LocalDate date, String scopeType, String scopeId, List<ChatLog> logs) {
         MetricsSummary metrics = computeMetrics(logs);
 
         // Upsert: delete existing then insert

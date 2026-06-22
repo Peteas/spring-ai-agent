@@ -1,9 +1,10 @@
 package com.sakura.spring.ai.agent.tool;
 
-import org.springframework.beans.factory.annotation.Value;
+import com.sakura.spring.ai.agent.config.AgentProperties;
 import org.springframework.stereotype.Component;
 
 import java.io.*;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
@@ -11,8 +12,19 @@ import java.util.regex.Pattern;
 @Component
 public class BashTool implements Tool {
 
-    @Value("${mimo.agent.command-timeout:120}")
-    private int commandTimeout;
+    private final AgentProperties agentProperties;
+
+    public BashTool(AgentProperties agentProperties) {
+        this.agentProperties = agentProperties;
+    }
+
+    private int commandTimeout() {
+        return agentProperties.getCommandTimeout();
+    }
+
+    private Path workingDir() {
+        return agentProperties.getWorkingDirPath();
+    }
 
     // 高危命令模式 - 使用正则匹配
     private static final List<Pattern> DANGEROUS_PATTERNS = List.of(
@@ -29,7 +41,9 @@ public class BashTool implements Tool {
             Pattern.compile("nc\\s+.*-e"),                           // netcat reverse shell
             Pattern.compile(">/dev/sd[a-z]"),                        // 写入磁盘
             Pattern.compile("mv\\s+.*\\s+/"),                        // 移动到根目录
-            Pattern.compile("cp\\s+.*\\s+/")                         // 复制到根目录
+            Pattern.compile("cp\\s+.*\\s+/"),                         // 复制到根目录
+            Pattern.compile("\\$\\([^)]*\\)"),                      // $(command)
+            Pattern.compile("`[^`]+`")                              // `command`
     );
 
     // 允许的安全命令前缀（白名单）
@@ -61,7 +75,7 @@ public class BashTool implements Tool {
 
     @Override
     public String description() {
-        return "Execute a shell command and return its output. Use for running tests, building projects, checking git status, installing packages, etc. Commands run in the working directory. Timeout: " + commandTimeout + "s.";
+        return "Execute a shell command and return its output. Use for running tests, building projects, checking git status, installing packages, etc. Commands run in the working directory. Timeout: " + commandTimeout() + "s.";
     }
 
     @Override
@@ -75,7 +89,7 @@ public class BashTool implements Tool {
                         ),
                         "timeout", Map.of(
                                 "type", "integer",
-                                "description", "Command timeout in seconds (default: " + commandTimeout + ")"
+                                "description", "Command timeout in seconds (default: " + commandTimeout() + ")"
                         )
                 ),
                 "required", List.of("command")
@@ -91,7 +105,7 @@ public class BashTool implements Tool {
 
         int timeout = args.containsKey("timeout")
                 ? ((Number) args.get("timeout")).intValue()
-                : commandTimeout;
+                : commandTimeout();
 
         // 预处理：标准化空格，防止 "rm  -rf  /" 等绕过
         String normalizedCommand = command.replaceAll("\\s+", " ").trim();
@@ -110,10 +124,15 @@ public class BashTool implements Tool {
             }
         }
 
-        // 检查命令前缀是否在白名单中
-        String firstCommand = extractFirstCommand(normalizedCommand);
-        if (firstCommand != null && !SAFE_COMMAND_PREFIXES.contains(firstCommand)) {
-            return ToolResult.error("Command not allowed: " + firstCommand + ". Allowed commands: " + SAFE_COMMAND_PREFIXES);
+        // 按 shell 操作符分割，每个子命令独立验证白名单
+        String[] subCommands = normalizedCommand.split("\\s*(?:&&|\\|\\||[;|])\\s*");
+        for (String sub : subCommands) {
+            String subCmd = sub.trim();
+            if (subCmd.isEmpty()) continue;
+            String cmd = extractFirstCommand(subCmd);
+            if (cmd != null && !SAFE_COMMAND_PREFIXES.contains(cmd)) {
+                return ToolResult.error("Command not allowed: " + cmd + ". Allowed commands: " + SAFE_COMMAND_PREFIXES);
+            }
         }
 
         try {
@@ -125,7 +144,7 @@ public class BashTool implements Tool {
                 pb.command("bash", "-c", command);
             }
 
-            pb.directory(new File(System.getProperty("user.dir")));
+            pb.directory(workingDir().toFile());
             pb.redirectErrorStream(true);
 
             Process process = pb.start();
@@ -137,6 +156,7 @@ public class BashTool implements Tool {
                     if (output.length() > 30000) {
                         output.append("\n... (output truncated)");
                         process.destroyForcibly();
+                        process.waitFor(5, TimeUnit.SECONDS);
                         return ToolResult.success(output.toString());
                     }
                     output.append(line).append("\n");
@@ -146,6 +166,7 @@ public class BashTool implements Tool {
             boolean finished = process.waitFor(timeout, TimeUnit.SECONDS);
             if (!finished) {
                 process.destroyForcibly();
+                process.waitFor(5, TimeUnit.SECONDS);
                 return ToolResult.error("Command timed out after " + timeout + " seconds.\nPartial output:\n" + output);
             }
 

@@ -1,5 +1,7 @@
 package com.sakura.spring.ai.agent.security;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.ReactiveSecurityContextHolder;
@@ -15,10 +17,14 @@ import java.util.List;
 @Component
 public class JwtAuthenticationFilter implements WebFilter {
 
-    private final JwtService jwtService;
+    private static final Logger log = LoggerFactory.getLogger(JwtAuthenticationFilter.class);
 
-    public JwtAuthenticationFilter(JwtService jwtService) {
+    private final JwtService jwtService;
+    private final TokenBlacklistService tokenBlacklistService;
+
+    public JwtAuthenticationFilter(JwtService jwtService, TokenBlacklistService tokenBlacklistService) {
         this.jwtService = jwtService;
+        this.tokenBlacklistService = tokenBlacklistService;
     }
 
     @Override
@@ -30,6 +36,11 @@ public class JwtAuthenticationFilter implements WebFilter {
 
             try {
                 if (jwtService.isTokenValid(token) && jwtService.isAccessToken(token)) {
+                    if (tokenBlacklistService.isBlacklisted(token)) {
+                        log.debug("Token is blacklisted, proceeding as unauthenticated");
+                        return chain.filter(exchange);
+                    }
+
                     io.jsonwebtoken.Claims claims = jwtService.parseToken(token);
                     Long userId = Long.parseLong(claims.getSubject());
                     String username = claims.get("username", String.class);
@@ -44,8 +55,8 @@ public class JwtAuthenticationFilter implements WebFilter {
                     return chain.filter(exchange)
                             .contextWrite(ReactiveSecurityContextHolder.withSecurityContext(Mono.just(securityContext)));
                 }
-            } catch (Exception ignored) {
-                // Invalid token — proceed as unauthenticated
+            } catch (Exception e) {
+                log.debug("Invalid token: {}", e.getMessage());
             }
         }
 

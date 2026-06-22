@@ -1,21 +1,29 @@
 package com.sakura.spring.ai.agent.tool;
 
-import org.springframework.beans.factory.annotation.Value;
+import com.sakura.spring.ai.agent.config.AgentProperties;
 import org.springframework.stereotype.Component;
 
 import java.io.*;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 @Component
 public class GitTool implements Tool {
 
-    @Value("${mimo.agent.command-timeout:120}")
-    private int commandTimeout;
+    private final AgentProperties agentProperties;
 
-    private static final Path WORKING_DIR = Paths.get(System.getProperty("user.dir")).toAbsolutePath().normalize();
+    public GitTool(AgentProperties agentProperties) {
+        this.agentProperties = agentProperties;
+    }
+
+    private Path workingDir() {
+        return agentProperties.getWorkingDirPath();
+    }
+
+    private int commandTimeout() {
+        return agentProperties.getCommandTimeout();
+    }
 
     @Override
     public String name() {
@@ -76,8 +84,8 @@ public class GitTool implements Tool {
                     if (file.startsWith("-")) {
                         yield ToolResult.error("Invalid file path: " + file + ". File paths cannot start with '-'");
                     }
-                    Path filePath = WORKING_DIR.resolve(file).normalize();
-                    if (!filePath.startsWith(WORKING_DIR)) {
+                    Path filePath = workingDir().resolve(file).normalize();
+                    if (!filePath.startsWith(workingDir())) {
                         yield ToolResult.error("Access denied: path outside working directory");
                     }
                 }
@@ -107,7 +115,7 @@ public class GitTool implements Tool {
             command.addAll(Arrays.asList(gitArgs));
 
             ProcessBuilder pb = new ProcessBuilder(command);
-            pb.directory(new File(System.getProperty("user.dir")));
+            pb.directory(workingDir().toFile());
             pb.redirectErrorStream(true);
 
             Process process = pb.start();
@@ -118,16 +126,18 @@ public class GitTool implements Tool {
                     if (output.length() > 30000) {
                         output.append("\n... (output truncated)");
                         process.destroyForcibly();
+                        process.waitFor(5, TimeUnit.SECONDS);
                         return ToolResult.success(output.toString());
                     }
                     output.append(line).append("\n");
                 }
             }
 
-            boolean finished = process.waitFor(commandTimeout, TimeUnit.SECONDS);
+            boolean finished = process.waitFor(commandTimeout(), TimeUnit.SECONDS);
             if (!finished) {
                 process.destroyForcibly();
-                return ToolResult.error("Git command timed out after " + commandTimeout + " seconds.\nPartial output:\n" + output);
+                process.waitFor(5, TimeUnit.SECONDS);
+                return ToolResult.error("Git command timed out after " + commandTimeout() + " seconds.\nPartial output:\n" + output);
             }
 
             int exitCode = process.exitValue();
