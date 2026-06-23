@@ -59,6 +59,13 @@ public class TodoTool implements Tool {
     }
 
     @Override
+    public PermissionLevel permissionLevel(Map<String, Object> args) {
+        String action = (String) args.get("action");
+        if ("list".equals(action)) return PermissionLevel.READ;
+        return PermissionLevel.WRITE;
+    }
+
+    @Override
     public ToolResult execute(Map<String, Object> args) {
         String action = (String) args.get("action");
         String sessionId = args.containsKey("sessionId") ? (String) args.get("sessionId") : "global";

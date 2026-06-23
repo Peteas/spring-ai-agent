@@ -46,4 +46,15 @@ public class ToolRegistry {
     public MiMoToolCallback getCallback(String name) {
         return tools.get(name);
     }
+
+    /**
+     * 查询工具的权限等级（根据具体参数动态判断）
+     */
+    public Tool.PermissionLevel getPermissionLevel(String toolName, Map<String, Object> args) {
+        MiMoToolCallback callback = tools.get(toolName);
+        if (callback == null) {
+            return Tool.PermissionLevel.DESTRUCTIVE; // 未知工具按最高权限
+        }
+        return callback.getTool().permissionLevel(args);
+    }
 }

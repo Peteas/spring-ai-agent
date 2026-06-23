@@ -36,16 +36,19 @@ public class MiMoAgent {
     private final ChatLogService chatLogService;
     private final ObjectMapper objectMapper;
     private final AgentProperties agentProperties;
+    private final ContextManager contextManager;
 
     public MiMoAgent(ChatModel chatModel, ToolRegistry toolRegistry,
                      ConversationMemory memory, ChatLogService chatLogService,
-                     ObjectMapper objectMapper, AgentProperties agentProperties) {
+                     ObjectMapper objectMapper, AgentProperties agentProperties,
+                     ContextManager contextManager) {
         this.chatModel = chatModel;
         this.toolRegistry = toolRegistry;
         this.memory = memory;
         this.chatLogService = chatLogService;
         this.objectMapper = objectMapper;
         this.agentProperties = agentProperties;
+        this.contextManager = contextManager;
     }
 
     public Flux<AgentEvent> chatStream(String sessionId, String userMessage) {
@@ -64,9 +67,14 @@ public class MiMoAgent {
         }
         String systemPrompt = SystemPrompt.build(agentProperties.getWorkingDirPath());
 
-        List<Message> messages = Collections.synchronizedList(new ArrayList<>());
-        messages.add(new SystemMessage(systemPrompt));
-        messages.addAll(memory.getMessages(sessionId));
+        List<Message> rawMessages = new ArrayList<>();
+        rawMessages.add(new SystemMessage(systemPrompt));
+        rawMessages.addAll(memory.getMessages(sessionId));
+
+        // 上下文压缩：当对话过长时自动压缩早期消息
+        rawMessages = contextManager.compressIfNeeded(rawMessages);
+        List<Message> messages = Collections.synchronizedList(rawMessages);
+
         List<ToolCallback> toolCallbacks = toolRegistry.getToolCallbacks();
 
         final int maxRounds = agentProperties.getMaxToolCallRounds();
@@ -146,8 +154,9 @@ public class MiMoAgent {
                             messages.add(toolCallMsg);
                             memory.addMessage(sessionId, toolCallMsg);
 
+                            int maxParallel = agentProperties.getMaxParallelToolCalls();
                             return Flux.fromIterable(accumulatedToolCalls)
-                                    .concatMap(tc -> Mono.fromCallable(() -> executeTool(sessionId, tc))
+                                    .flatMap(tc -> Mono.fromCallable(() -> executeTool(sessionId, tc))
                                             .subscribeOn(Schedulers.boundedElastic())
                                             .flatMapMany(result -> {
                                                 messages.add(result.toolResponseMessage());
@@ -158,7 +167,9 @@ public class MiMoAgent {
                                                         AgentEvent.toolCall(tc.name(), tc.arguments()),
                                                         AgentEvent.toolResult(tc.name(), result.output(), result.isError())
                                                 );
-                                            }));
+                                            }),
+                                            maxParallel
+                                    );
                         } else {
                             String answer = contentBuilder.toString();
                             if (!answer.isEmpty()) {
@@ -202,6 +213,15 @@ public class MiMoAgent {
                 parsedArgs = new HashMap<>(parsedArgs);
                 parsedArgs.putIfAbsent("sessionId", sessionId);
             }
+
+            // 权限等级审计日志
+            Tool.PermissionLevel level = toolRegistry.getPermissionLevel(tc.name(), parsedArgs);
+            if (level == Tool.PermissionLevel.DESTRUCTIVE) {
+                log.warn("Session {} - DESTRUCTIVE tool call: {} | args: {}", sessionId, tc.name(), tc.arguments());
+            } else if (level == Tool.PermissionLevel.WRITE) {
+                log.info("Session {} - WRITE tool call: {} | args: {}", sessionId, tc.name(), tc.arguments());
+            }
+
             log.debug("Session {} - Executing tool: {}", sessionId, tc.name());
             result = toolRegistry.execute(tc.name(), parsedArgs);
         }
@@ -245,6 +265,9 @@ public class MiMoAgent {
                         case ERROR -> {
                             if (callback != null) callback.onError(event.content());
                         }
+                        case CONFIRMATION_REQUIRED -> {
+                            if (callback != null) callback.onConfirmationRequired(event.toolName(), event.content());
+                        }
                     }
                 })
                 .blockLast();
@@ -277,13 +300,14 @@ public class MiMoAgent {
         default void onAnswerChunk(String chunk) {}
         default void onThinking(String content) {}
         default void onError(String error) {}
+        default void onConfirmationRequired(String toolName, String reason) {}
     }
 
     public record AgentResponse(String content, boolean success) {}
 
     public record AgentEvent(EventType type, String toolName, String content, boolean isError,
                              int promptTokens, int completionTokens, int totalTokens) {
-        public enum EventType { THINKING, TOOL_CALL, TOOL_RESULT, ANSWER_CHUNK, DONE, ERROR }
+        public enum EventType { THINKING, TOOL_CALL, TOOL_RESULT, ANSWER_CHUNK, DONE, ERROR, CONFIRMATION_REQUIRED }
 
         public static AgentEvent thinking(String content) {
             return new AgentEvent(EventType.THINKING, null, content, false, 0, 0, 0);
@@ -311,6 +335,10 @@ public class MiMoAgent {
 
         public static AgentEvent error(String message) {
             return new AgentEvent(EventType.ERROR, null, message, true, 0, 0, 0);
+        }
+
+        public static AgentEvent confirmationRequired(String toolName, String args, String reason) {
+            return new AgentEvent(EventType.CONFIRMATION_REQUIRED, toolName, reason + "\nArgs: " + args, false, 0, 0, 0);
         }
     }
 }

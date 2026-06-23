@@ -64,6 +64,17 @@ public class GitTool implements Tool {
     }
 
     @Override
+    public PermissionLevel permissionLevel(Map<String, Object> args) {
+        String action = (String) args.get("action");
+        if (action == null) return PermissionLevel.READ;
+        return switch (action) {
+            case "status", "diff", "log", "branch" -> PermissionLevel.READ;
+            case "add", "commit" -> PermissionLevel.WRITE;
+            default -> PermissionLevel.WRITE;
+        };
+    }
+
+    @Override
     public ToolResult execute(Map<String, Object> args) {
         String action = (String) args.get("action");
 

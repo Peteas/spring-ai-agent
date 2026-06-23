@@ -95,6 +95,14 @@ public class StreamRenderer {
         System.out.println(YELLOW + "  " + message + RESET);
     }
 
+    public void printConfirmationRequired(String toolName, String reason) {
+        System.out.println();
+        System.out.println(YELLOW + BOLD + "  ⚠ CONFIRMATION REQUIRED" + RESET);
+        System.out.println(YELLOW + "  Tool: " + toolName + RESET);
+        System.out.println(YELLOW + "  Reason: " + reason + RESET);
+        System.out.println();
+    }
+
     public void printSeparator() {
         System.out.println(GRAY + "  ─────────────────────────────────────────" + RESET);
     }

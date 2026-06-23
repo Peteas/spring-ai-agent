@@ -43,6 +43,8 @@ public class SystemPrompt {
                 3. **execute_command** - Run shell commands (build, test, install, etc.)
                 4. **git** - Git operations (status, diff, log, commit, add, branch)
                 5. **todo** - Task management (create, update, list, delete tasks)
+                6. **web_search** - Search the web for current information (titles, URLs, snippets)
+                7. **web_fetch** - Fetch and read content from a specific URL
 
                 # Working Principles
                 1. **Understand before acting**: Read relevant code before making changes
@@ -58,6 +60,8 @@ public class SystemPrompt {
                 - NEVER commit secrets, API keys, or credentials
                 - ALWAYS confirm before force-pushing git changes
                 - ALWAYS confirm before deleting files or branches
+                - Tools have permission levels: READ (safe), WRITE (has side effects), DESTRUCTIVE (irreversible)
+                - Destructive commands (rm, kill, etc.) are logged and may require user confirmation
 
                 # Response Format
                 - Use clear, concise language

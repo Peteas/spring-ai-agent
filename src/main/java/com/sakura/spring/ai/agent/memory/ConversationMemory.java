@@ -138,7 +138,16 @@ public class ConversationMemory {
             if (size != null && size > maxMessages) {
                 redis.opsForList().trim(key, size - maxMessages, -1);
             }
-            refreshCache(sessionId);
+            // 增量更新缓存：直接追加，避免全量重新加载
+            List<Message> cached = sessionCache.get(sessionId);
+            if (cached != null) {
+                cached.add(message);
+                while (cached.size() > maxMessages) {
+                    cached.remove(0);
+                }
+            } else {
+                sessionCache.put(sessionId, new CopyOnWriteArrayList<>(List.of(message)));
+            }
         } catch (Exception e) {
             log.error("Failed to add message to Redis for session {}: {}", sessionId, e.getMessage());
             redisAvailable.set(false);

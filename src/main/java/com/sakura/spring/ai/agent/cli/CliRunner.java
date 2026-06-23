@@ -117,6 +117,11 @@ public class CliRunner implements CommandLineRunner {
                     public void onError(String error) {
                         renderer.printError(error);
                     }
+
+                    @Override
+                    public void onConfirmationRequired(String toolName, String reason) {
+                        renderer.printConfirmationRequired(toolName, reason);
+                    }
                 });
 
             } catch (Exception e) {

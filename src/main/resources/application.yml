@@ -57,7 +57,23 @@ mimo:
     max-context-messages: 50
     safety-mode: strict
     max-tool-call-rounds: 20
+    max-parallel-tool-calls: 4
+    max-context-tokens: 32000
+    keep-recent-turns: 10
     model: mimo-v2.5-pro
+  # 工具配置
+  tool:
+    web-search:
+      enabled: true
+      provider: tavily
+      api-key: ${TAVILY_API_KEY:}
+      base-url: ${TAVILY_BASE_URL:https://api.tavily.com}
+      max-results: 5
+      timeout-seconds: 10
+    web-fetch:
+      enabled: true
+      max-content-size: 30720
+      timeout-seconds: 15
   # JWT 配置
   jwt:
     secret: ${JWT_SECRET:a8Kj3mN9pQ2rS7tU1vW5xY0zB4cD6eF8gH0iJ2kL4mN6oP8qR0sT2uV4wX6yZ}

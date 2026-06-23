@@ -69,6 +69,17 @@ public class FileTool implements Tool {
     }
 
     @Override
+    public PermissionLevel permissionLevel(Map<String, Object> args) {
+        String action = (String) args.get("action");
+        if (action == null) return PermissionLevel.READ;
+        return switch (action) {
+            case "read_file", "list_directory" -> PermissionLevel.READ;
+            case "write_file", "edit_file" -> PermissionLevel.WRITE;
+            default -> PermissionLevel.WRITE;
+        };
+    }
+
+    @Override
     public ToolResult execute(Map<String, Object> args) {
         String action = (String) args.get("action");
         String path = (String) args.get("path");
